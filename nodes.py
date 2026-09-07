@@ -646,7 +646,14 @@ class H3SaveImage:
             # Pillow registers the JPEG encoder as "JPEG", while the UI uses
             # the friendlier "JPG" label.
             image.save(path, format="JPEG" if fmt == "JPG" else fmt, **save_kwargs)
-            results.append({"filename": os.path.basename(path), "subfolder": os.path.relpath(output_dir, folder_paths.get_output_directory()), "type": "output"})
+            try:
+                subfolder = os.path.relpath(output_dir, folder_paths.get_output_directory())
+            except ValueError:
+                # Cross-drive paths have no Windows relative path. The file
+                # is saved successfully; ComfyUI's preview route cannot serve
+                # an external drive, so leave this field empty.
+                subfolder = ""
+            results.append({"filename": os.path.basename(path), "subfolder": subfolder, "type": "output"})
             if save_json and isinstance(workflow, dict):
                 json_path = os.path.splitext(path)[0] + ".json"
                 with open(json_path, "w", encoding="utf-8") as handle:
