@@ -920,6 +920,7 @@ class H3ImagePromptGenerator:
         return {"required": {
             "Original Request": ("STRING", {"default": "", "multiline": True, "placeholder": "Describe what you want to create..."}),
             "Prompt Count": ("INT", {"default": 4, "min": 1, "max": 12, "step": 1}),
+            "Seed": ("INT", {"default": -1, "min": -1, "max": 0xFFFFFFFF, "step": 1}),
             "Prompt Format": (["SDXL / Illustrious / NoobAI Tags", "Natural Language"], {"default": "Natural Language"}),
             "Aspect Ratio": (["Auto", "1:1 Square", "4:3 Landscape", "3:4 Portrait", "16:9 Widescreen", "9:16 Vertical", "2:3 Portrait", "21:9 Ultrawide"], {"default": "Auto"}),
             "Model Source": ("BOOLEAN", {"default": False, "label_on": "Online LLM", "label_off": "Local Model"}),
@@ -944,6 +945,7 @@ class H3ImagePromptGenerator:
         if not request:
             raise ValueError("Original Request cannot be empty.")
         count = int(inputs.get("Prompt Count", 4))
+        seed = int(inputs.get("Seed", -1))
         prompt_format = inputs.get("Prompt Format", "Natural Language")
         tag_mode = prompt_format == "SDXL / Illustrious / NoobAI Tags"
         aspect_ratio = inputs.get("Aspect Ratio", "Auto")
@@ -1001,6 +1003,9 @@ class H3ImagePromptGenerator:
         try:
             system = {"role": "system", "content": "You are an expert image prompt writer."}
             messages = [system, {"role": "user", "content": content}]
+            completion_parameters = {"max_tokens": 4096, "temperature": 0.8, "top_p": 0.95}
+            if seed >= 0:
+                completion_parameters["seed"] = seed
 
             def parse_prompts(text):
                 lines = [line.strip().lstrip("-•* ").strip() for line in text.splitlines() if line.strip()]
@@ -1013,7 +1018,7 @@ class H3ImagePromptGenerator:
                     prompt = prompt.rstrip(" ,，") + ", " + ", ".join(missing)
                 return prompt
 
-            raw = _stream_completion(llm, messages, "Image Prompt Generation", max_tokens=4096, temperature=0.8, top_p=0.95)
+            raw = _stream_completion(llm, messages, "Image Prompt Generation", **completion_parameters)
             prompts = [preserve_literals(prompt) for prompt in parse_prompts(raw)]
 
             # Smaller local models sometimes answer with only one prompt despite
@@ -1028,10 +1033,17 @@ class H3ImagePromptGenerator:
                     "Return only that single prompt on one line, with no numbering, explanation, or negative prompt."
                 )})
                 try:
+                    retry_parameters = dict(completion_parameters)
+                    if seed >= 0:
+                        retry_parameters["seed"] = seed + index
+                    else:
+                        retry_parameters.pop("seed", None)
+                    retry_parameters["max_tokens"] = 2048
+                    retry_parameters["temperature"] = 0.85
                     extra = _stream_completion(
                         llm, [system, {"role": "user", "content": retry_content}],
                         f"Image Prompt Generation ({index + 1}/{count})",
-                        max_tokens=2048, temperature=0.85, top_p=0.95,
+                        **retry_parameters,
                     )
                     candidates = parse_prompts(extra)
                     if candidates:
