@@ -17,6 +17,9 @@
 - 使用随仓库附带的 MiniMax 官方 skills 本地副本，不运行时联网
 - 可选择生成后卸载本地模型（默认开启）
 - 3D 动画、品牌宣传、产品广告、音乐字幕、纸艺科普等创意技能
+- Image Prompt Generator：根据原始需求和最多两张参考图生成多条图像提示词
+- 图像提示词支持 `SDXL / Illustrious / NoobAI Tags` 或 `Natural Language` 格式
+- 两种格式均只输出正面提示词，不生成 negative prompt、negative tags 或排除项
 
 ### 安装与使用
 
@@ -56,6 +59,9 @@ text-to-video mode, generation-type selection, creative skill selection, and Eng
 - Vendored MiniMax official skills are used locally; no runtime network synchronization
 - Optional model unload after generation (enabled by default)
 - Creative skills for 3D shorts, brand ads, product ads, music subtitles, and paper-craft explainers
+- Image Prompt Generator creates multiple image prompts from the request and up to two reference images
+- Image prompts support `SDXL / Illustrious / NoobAI Tags` and `Natural Language` formats
+- Both formats output positive prompts only; no negative prompts, negative tags, or exclusions are generated
 
 ### Installation
 

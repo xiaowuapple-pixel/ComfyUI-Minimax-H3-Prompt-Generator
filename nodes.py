@@ -920,6 +920,7 @@ class H3ImagePromptGenerator:
         return {"required": {
             "Original Request": ("STRING", {"default": "", "multiline": True, "placeholder": "Describe what you want to create..."}),
             "Prompt Count": ("INT", {"default": 4, "min": 1, "max": 12, "step": 1}),
+            "Prompt Format": (["SDXL / Illustrious / NoobAI Tags", "Natural Language"], {"default": "Natural Language"}),
             "Model Source": ("BOOLEAN", {"default": False, "label_on": "Online LLM", "label_off": "Local Model"}),
             "Language Model": (models,),
             "Vision Model": (vision_models,),
@@ -942,11 +943,14 @@ class H3ImagePromptGenerator:
         if not request:
             raise ValueError("Original Request cannot be empty.")
         count = int(inputs.get("Prompt Count", 4))
+        prompt_format = inputs.get("Prompt Format", "Natural Language")
+        tag_mode = prompt_format == "SDXL / Illustrious / NoobAI Tags"
         images = [inputs[name] for name in ("Image 1", "Image 2") if inputs.get(name) is not None]
         content = [{"type": "text", "text": (
             f"Original user request:\n{request}\n\nGenerate exactly {count} distinct image-generation prompts. "
-            "Improve the idea with tasteful creative direction, composition, lighting, materials, camera and atmosphere. "
+            "Improve the idea with tasteful creative direction using a structured subject-first workflow: identify the main subject and action, then composition, camera/viewpoint, environment, lighting, color palette, materials, mood, and rendering/style cues. "
             "Each prompt must be self-contained and directly usable by an image model. "
+            "Use only positive visual descriptions; never output negative prompts, negative tags, exclusions, or a separate negative-prompt field. "
             "Do not add explanations, numbering, markdown fences, or commentary. Return one prompt per line."
         )}]
         if images:
@@ -955,7 +959,20 @@ class H3ImagePromptGenerator:
                 content.append({"type": "text", "text": f"Reference image {index}:"})
                 content.append({"type": "image_url", "image_url": {"url": _tensor_to_data_url(image)}})
         language = "Simplified Chinese" if inputs.get("Output Chinese", False) else "English"
-        content[0]["text"] += f"\nWrite all prompts in {language}."
+        if tag_mode:
+            content[0]["text"] += (
+                "\nFORMAT: SDXL / Illustrious / NoobAI-compatible positive tag prompts. "
+                "Write in English only, as comma-separated weighted or unweighted tags. "
+                "Use a practical tag order: quality/style, subject, appearance, clothing, pose/action, "
+                "composition, environment, lighting, color, camera and medium/style. "
+                "Do not write prose sentences, headings, numbering, or negative prompts."
+            )
+        else:
+            content[0]["text"] += (
+                f"\nFORMAT: Natural-language image prompts in {language}. "
+                "Write fluent, vivid but reasonably concise sentences or a compact paragraph. "
+                "Do not force tag syntax or add negative prompts."
+            )
         if online:
             key = inputs.get("Online API Key", "").strip()
             if not key:
