@@ -594,9 +594,13 @@ class H3SaveImage:
     def _safe_output_dir(folder):
         root = os.path.abspath(folder_paths.get_output_directory())
         folder = (folder or "").strip().replace("/", os.sep).replace("\\", os.sep)
-        target = os.path.abspath(os.path.join(root, folder)) if folder else root
-        if os.path.commonpath((root, target)) != root:
-            raise ValueError("Output Folder must stay inside ComfyUI/output.")
+        # Relative folders stay under ComfyUI/output. Absolute folders are
+        # supported intentionally so users can save to another drive.
+        target = os.path.abspath(folder) if os.path.isabs(folder) else (
+            os.path.abspath(os.path.join(root, folder)) if folder else root
+        )
+        if not os.path.isabs(folder) and os.path.commonpath((root, target)) != root:
+            raise ValueError("Relative Output Folder must stay inside ComfyUI/output; use an absolute path for another drive.")
         os.makedirs(target, exist_ok=True)
         return target
 
