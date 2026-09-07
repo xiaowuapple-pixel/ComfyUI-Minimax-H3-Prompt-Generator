@@ -910,12 +910,82 @@ class Qwen36MultiImageH3ChinesePrompt:
                 _VisionRuntime.close()
 
 
+class H3ImagePromptGenerator:
+    """Generate a list of creative image-generation prompts from text and up to two images."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        models = _language_models() or ["No language models found"]
+        vision_models = _vision_models() or ["No vision models found"]
+        return {"required": {
+            "Original Request": ("STRING", {"default": "", "multiline": True, "placeholder": "Describe what you want to create..."}),
+            "Prompt Count": ("INT", {"default": 4, "min": 1, "max": 12, "step": 1}),
+            "Model Source": ("BOOLEAN", {"default": False, "label_on": "Online LLM", "label_off": "Local Model"}),
+            "Language Model": (models,),
+            "Vision Model": (vision_models,),
+            "GPU Offload Layers": ("INT", {"default": -1, "min": -1, "max": 256, "step": 1}),
+            "Online Request URL": ("STRING", {"default": "https://api.openai.com/v1", "multiline": False}),
+            "Online API Key": ("STRING", {"default": "", "multiline": False, "password": True}),
+            "Online Model": ("STRING", {"default": "", "multiline": False}),
+            "Output Chinese": ("BOOLEAN", {"default": False}),
+        }, "optional": {"Image 1": ("IMAGE",), "Image 2": ("IMAGE",)}}
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("Image Prompts",)
+    OUTPUT_IS_LIST = (True,)
+    FUNCTION = "generate"
+    CATEGORY = "MiniMax H3/Prompt"
+
+    def generate(self, **inputs):
+        online = _is_online_source(inputs.get("Model Source", False))
+        request = inputs.get("Original Request", "").strip()
+        if not request:
+            raise ValueError("Original Request cannot be empty.")
+        count = int(inputs.get("Prompt Count", 4))
+        images = [inputs[name] for name in ("Image 1", "Image 2") if inputs.get(name) is not None]
+        content = [{"type": "text", "text": (
+            f"Original user request:\n{request}\n\nGenerate exactly {count} distinct image-generation prompts. "
+            "Improve the idea with tasteful creative direction, composition, lighting, materials, camera and atmosphere. "
+            "Each prompt must be self-contained and directly usable by an image model. "
+            "Do not add explanations, numbering, markdown fences, or commentary. Return one prompt per line."
+        )}]
+        if images:
+            content[0]["text"] += "\nReference images are provided. Identify visible people, scene, objects, clothing, colors and style, and incorporate only supported traits into the prompts."
+            for index, image in enumerate(images, 1):
+                content.append({"type": "text", "text": f"Reference image {index}:"})
+                content.append({"type": "image_url", "image_url": {"url": _tensor_to_data_url(image)}})
+        language = "Simplified Chinese" if inputs.get("Output Chinese", False) else "English"
+        content[0]["text"] += f"\nWrite all prompts in {language}."
+        if online:
+            key = inputs.get("Online API Key", "").strip()
+            if not key:
+                raise ValueError("Online API Key is required in Online LLM mode.")
+            llm = _OnlineRuntime(inputs.get("Online Request URL", ""), key, inputs.get("Online Model", ""))
+        else:
+            if inputs.get("Language Model") in {"No language models found", None}:
+                raise FileNotFoundError("No local language model was found.")
+            llm = _VisionRuntime.load(inputs["Language Model"], inputs["Vision Model"], inputs["GPU Offload Layers"])
+        try:
+            raw = _stream_completion(llm, [{"role": "system", "content": "You are an expert image prompt writer."}, {"role": "user", "content": content}], "Image Prompt Generation", max_tokens=4096, temperature=0.8, top_p=0.95)
+            prompts = [line.strip().lstrip("-•* ").strip() for line in raw.splitlines() if line.strip()]
+            prompts = [re.sub(r"^\d+[.)、]\s*", "", line) for line in prompts]
+            prompts = [line for line in prompts if len(line) > 12 and not line.startswith("```")]
+            if len(prompts) < count:
+                raise RuntimeError(f"The model returned only {len(prompts)} prompts; expected {count}.")
+            return (prompts[:count],)
+        finally:
+            if not online:
+                _VisionRuntime.close()
+
+
 NODE_CLASS_MAPPINGS = {
     "H3Prompt": Qwen36MultiImageH3ChinesePrompt,
     "H3SaveImage": H3SaveImage,
+    "H3ImagePromptGenerator": H3ImagePromptGenerator,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "H3Prompt": "H3 Prompt",
     "H3SaveImage": "H3 Save Image",
+    "H3ImagePromptGenerator": "Image Prompt Generator",
 }
