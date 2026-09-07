@@ -643,7 +643,9 @@ class H3SaveImage:
                 save_kwargs = {"quality": quality, "optimize": True}
             else:
                 save_kwargs = {"quality": quality, "method": 6}
-            image.save(path, format=fmt, **save_kwargs)
+            # Pillow registers the JPEG encoder as "JPEG", while the UI uses
+            # the friendlier "JPG" label.
+            image.save(path, format="JPEG" if fmt == "JPG" else fmt, **save_kwargs)
             results.append({"filename": os.path.basename(path), "subfolder": os.path.relpath(output_dir, folder_paths.get_output_directory()), "type": "output"})
             if save_json and isinstance(workflow, dict):
                 json_path = os.path.splitext(path)[0] + ".json"
