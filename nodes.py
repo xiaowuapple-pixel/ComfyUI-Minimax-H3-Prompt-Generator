@@ -7,6 +7,7 @@ import json
 import urllib.request
 import os
 import hashlib
+import random
 from pathlib import Path
 
 import numpy as np
@@ -939,6 +940,15 @@ class H3ImagePromptGenerator:
     FUNCTION = "generate"
     CATEGORY = "MiniMax H3/Prompt"
 
+    @classmethod
+    def IS_CHANGED(cls, **inputs):
+        """Make the -1 seed mode bypass ComfyUI's execution cache."""
+        try:
+            seed = int(inputs.get("Seed", -1))
+        except (TypeError, ValueError):
+            seed = -1
+        return time.time_ns() if seed == -1 else seed
+
     def generate(self, **inputs):
         online = _is_online_source(inputs.get("Model Source", False))
         request = inputs.get("Original Request", "").strip()
@@ -946,6 +956,7 @@ class H3ImagePromptGenerator:
             raise ValueError("Original Request cannot be empty.")
         count = int(inputs.get("Prompt Count", 4))
         seed = int(inputs.get("Seed", -1))
+        actual_seed = random.SystemRandom().randint(0, 0xFFFFFFFF) if seed == -1 else seed
         prompt_format = inputs.get("Prompt Format", "Natural Language")
         tag_mode = prompt_format == "SDXL / Illustrious / NoobAI Tags"
         aspect_ratio = inputs.get("Aspect Ratio", "Auto")
@@ -1004,8 +1015,7 @@ class H3ImagePromptGenerator:
             system = {"role": "system", "content": "You are an expert image prompt writer."}
             messages = [system, {"role": "user", "content": content}]
             completion_parameters = {"max_tokens": 4096, "temperature": 0.8, "top_p": 0.95}
-            if seed >= 0:
-                completion_parameters["seed"] = seed
+            completion_parameters["seed"] = actual_seed
 
             def parse_prompts(text):
                 lines = [line.strip().lstrip("-•* ").strip() for line in text.splitlines() if line.strip()]
@@ -1034,10 +1044,7 @@ class H3ImagePromptGenerator:
                 )})
                 try:
                     retry_parameters = dict(completion_parameters)
-                    if seed >= 0:
-                        retry_parameters["seed"] = seed + index
-                    else:
-                        retry_parameters.pop("seed", None)
+                    retry_parameters["seed"] = (actual_seed + index) & 0xFFFFFFFF
                     retry_parameters["max_tokens"] = 2048
                     retry_parameters["temperature"] = 0.85
                     extra = _stream_completion(

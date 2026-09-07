@@ -21,7 +21,7 @@
 - 图像提示词支持 `SDXL / Illustrious / NoobAI Tags` 或 `Natural Language` 格式
 - 提供常用画面比例：1:1、4:3、3:4、16:9、9:16、2:3、21:9，也可自动判断
 - 生成时会把画面比例作为构图约束，考虑主体尺度、取景、裁切边界和留白
-- 提供随机种子：固定种子可复现生成结果，设为 `-1` 时每次随机
+- 提供随机种子：固定种子可复现生成结果，设为 `-1` 时每次执行都会绕过缓存并重新随机
 - 两种格式均只输出正面提示词，不生成 negative prompt、negative tags 或排除项
 
 ### 安装与使用
@@ -66,7 +66,7 @@ text-to-video mode, generation-type selection, creative skill selection, and Eng
 - Image prompts support `SDXL / Illustrious / NoobAI Tags` and `Natural Language` formats
 - Common aspect ratios are available: 1:1, 4:3, 3:4, 16:9, 9:16, 2:3, and 21:9, plus Auto
 - The selected ratio is treated as a composition constraint for framing, subject scale, crop boundaries, and negative space
-- A Seed control is available: fixed seeds improve reproducibility; `-1` selects a random seed per run
+- A Seed control is available: fixed seeds improve reproducibility; `-1` bypasses the execution cache and selects a new random seed on every run
 - Both formats output positive prompts only; no negative prompts, negative tags, or exclusions are generated
 
 ### Installation
