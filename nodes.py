@@ -947,17 +947,25 @@ class H3ImagePromptGenerator:
         prompt_format = inputs.get("Prompt Format", "Natural Language")
         tag_mode = prompt_format == "SDXL / Illustrious / NoobAI Tags"
         aspect_ratio = inputs.get("Aspect Ratio", "Auto")
+        # Parenthesized user text is a literal constraint. Keep it byte-for-byte
+        # (including the brackets) in every generated prompt.
+        literal_segments = re.findall(r"\([^()\n]+\)|（[^（）\n]+）", request)
         images = [inputs[name] for name in ("Image 1", "Image 2") if inputs.get(name) is not None]
         framing_instruction = (
             "Choose a suitable aspect ratio from the concept and make composition adaptable to it."
             if aspect_ratio == "Auto" else
             f"Design every prompt for a {aspect_ratio} canvas. Treat this ratio as a composition constraint: plan framing, subject scale, visual balance, crop boundaries, and negative space so the main subject remains readable within the frame."
         )
+        literal_instruction = (
+            f"The following parenthesized text is mandatory literal content: {', '.join(literal_segments)}. Include each item exactly as written, including its brackets, in every prompt. Do not translate, paraphrase, or remove it. "
+            if literal_segments else ""
+        )
         content = [{"type": "text", "text": (
             f"Original user request:\n{request}\n\nGenerate exactly {count} distinct image-generation prompts. "
             "Improve the idea with tasteful creative direction using a structured subject-first workflow: identify the main subject and action, then composition, camera/viewpoint, environment, lighting, color palette, materials, mood, and rendering/style cues. "
             f"{framing_instruction} "
             "Each prompt must be self-contained and directly usable by an image model. "
+            + literal_instruction
             "Use only positive visual descriptions; never output negative prompts, negative tags, exclusions, or a separate negative-prompt field. "
             "Do not add explanations, numbering, markdown fences, or commentary. Return one prompt per line."
         )}]
@@ -999,8 +1007,14 @@ class H3ImagePromptGenerator:
                 lines = [re.sub(r"^\d+[.)、:]\s*", "", line) for line in lines]
                 return [line for line in lines if len(line) > 12 and not line.startswith("```")]
 
+            def preserve_literals(prompt):
+                missing = [item for item in literal_segments if item not in prompt]
+                if missing:
+                    prompt = prompt.rstrip(" ,，") + ", " + ", ".join(missing)
+                return prompt
+
             raw = _stream_completion(llm, messages, "Image Prompt Generation", max_tokens=4096, temperature=0.8, top_p=0.95)
-            prompts = parse_prompts(raw)
+            prompts = [preserve_literals(prompt) for prompt in parse_prompts(raw)]
 
             # Smaller local models sometimes answer with only one prompt despite
             # the requested count. Ask for the missing entries individually so
@@ -1021,7 +1035,7 @@ class H3ImagePromptGenerator:
                     )
                     candidates = parse_prompts(extra)
                     if candidates:
-                        prompts.append(candidates[0])
+                        prompts.append(preserve_literals(candidates[0]))
                 except Exception as retry_error:
                     print(f"[Image Prompt Generator] Unable to generate alternative {index + 1}: {retry_error}")
 
