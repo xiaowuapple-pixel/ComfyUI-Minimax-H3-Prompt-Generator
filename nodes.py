@@ -983,12 +983,45 @@ class H3ImagePromptGenerator:
                 raise FileNotFoundError("No local language model was found.")
             llm = _VisionRuntime.load(inputs["Language Model"], inputs["Vision Model"], inputs["GPU Offload Layers"])
         try:
-            raw = _stream_completion(llm, [{"role": "system", "content": "You are an expert image prompt writer."}, {"role": "user", "content": content}], "Image Prompt Generation", max_tokens=4096, temperature=0.8, top_p=0.95)
-            prompts = [line.strip().lstrip("-•* ").strip() for line in raw.splitlines() if line.strip()]
-            prompts = [re.sub(r"^\d+[.)、]\s*", "", line) for line in prompts]
-            prompts = [line for line in prompts if len(line) > 12 and not line.startswith("```")]
-            if len(prompts) < count:
-                raise RuntimeError(f"The model returned only {len(prompts)} prompts; expected {count}.")
+            system = {"role": "system", "content": "You are an expert image prompt writer."}
+            messages = [system, {"role": "user", "content": content}]
+
+            def parse_prompts(text):
+                lines = [line.strip().lstrip("-•* ").strip() for line in text.splitlines() if line.strip()]
+                lines = [re.sub(r"^\d+[.)、:]\s*", "", line) for line in lines]
+                return [line for line in lines if len(line) > 12 and not line.startswith("```")]
+
+            raw = _stream_completion(llm, messages, "Image Prompt Generation", max_tokens=4096, temperature=0.8, top_p=0.95)
+            prompts = parse_prompts(raw)
+
+            # Smaller local models sometimes answer with only one prompt despite
+            # the requested count. Ask for the missing entries individually so
+            # the node remains usable without failing the whole workflow.
+            for index in range(len(prompts), count):
+                remaining = count - index
+                retry_content = list(content)
+                retry_content.append({"type": "text", "text": (
+                    f"The previous response contained too few entries. Generate exactly ONE additional, "
+                    f"distinct prompt now (alternative {index + 1} of {count}). "
+                    "Return only that single prompt on one line, with no numbering, explanation, or negative prompt."
+                )})
+                try:
+                    extra = _stream_completion(
+                        llm, [system, {"role": "user", "content": retry_content}],
+                        f"Image Prompt Generation ({index + 1}/{count})",
+                        max_tokens=2048, temperature=0.85, top_p=0.95,
+                    )
+                    candidates = parse_prompts(extra)
+                    if candidates:
+                        prompts.append(candidates[0])
+                except Exception as retry_error:
+                    print(f"[Image Prompt Generator] Unable to generate alternative {index + 1}: {retry_error}")
+
+            # Do not turn a partially successful generation into a red node.
+            # Returning the available prompts is preferable to aborting the
+            # entire workflow; the output remains a valid STRING list.
+            if not prompts:
+                raise RuntimeError("The model did not return any usable image prompts.")
             return (prompts[:count],)
         finally:
             if not online:
