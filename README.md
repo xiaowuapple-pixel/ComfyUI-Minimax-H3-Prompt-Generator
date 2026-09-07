@@ -19,6 +19,8 @@
 - 3D 动画、品牌宣传、产品广告、音乐字幕、纸艺科普等创意技能
 - Image Prompt Generator：根据原始需求和最多两张参考图生成多条图像提示词
 - 图像提示词支持 `SDXL / Illustrious / NoobAI Tags` 或 `Natural Language` 格式
+- 提供常用画面比例：1:1、4:3、3:4、16:9、9:16、2:3、21:9，也可自动判断
+- 生成时会把画面比例作为构图约束，考虑主体尺度、取景、裁切边界和留白
 - 两种格式均只输出正面提示词，不生成 negative prompt、negative tags 或排除项
 
 ### 安装与使用
@@ -61,6 +63,8 @@ text-to-video mode, generation-type selection, creative skill selection, and Eng
 - Creative skills for 3D shorts, brand ads, product ads, music subtitles, and paper-craft explainers
 - Image Prompt Generator creates multiple image prompts from the request and up to two reference images
 - Image prompts support `SDXL / Illustrious / NoobAI Tags` and `Natural Language` formats
+- Common aspect ratios are available: 1:1, 4:3, 3:4, 16:9, 9:16, 2:3, and 21:9, plus Auto
+- The selected ratio is treated as a composition constraint for framing, subject scale, crop boundaries, and negative space
 - Both formats output positive prompts only; no negative prompts, negative tags, or exclusions are generated
 
 ### Installation

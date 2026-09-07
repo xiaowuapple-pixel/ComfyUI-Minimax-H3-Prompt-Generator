@@ -921,6 +921,7 @@ class H3ImagePromptGenerator:
             "Original Request": ("STRING", {"default": "", "multiline": True, "placeholder": "Describe what you want to create..."}),
             "Prompt Count": ("INT", {"default": 4, "min": 1, "max": 12, "step": 1}),
             "Prompt Format": (["SDXL / Illustrious / NoobAI Tags", "Natural Language"], {"default": "Natural Language"}),
+            "Aspect Ratio": (["Auto", "1:1 Square", "4:3 Landscape", "3:4 Portrait", "16:9 Widescreen", "9:16 Vertical", "2:3 Portrait", "21:9 Ultrawide"], {"default": "Auto"}),
             "Model Source": ("BOOLEAN", {"default": False, "label_on": "Online LLM", "label_off": "Local Model"}),
             "Language Model": (models,),
             "Vision Model": (vision_models,),
@@ -945,10 +946,17 @@ class H3ImagePromptGenerator:
         count = int(inputs.get("Prompt Count", 4))
         prompt_format = inputs.get("Prompt Format", "Natural Language")
         tag_mode = prompt_format == "SDXL / Illustrious / NoobAI Tags"
+        aspect_ratio = inputs.get("Aspect Ratio", "Auto")
         images = [inputs[name] for name in ("Image 1", "Image 2") if inputs.get(name) is not None]
+        framing_instruction = (
+            "Choose a suitable aspect ratio from the concept and make composition adaptable to it."
+            if aspect_ratio == "Auto" else
+            f"Design every prompt for a {aspect_ratio} canvas. Treat this ratio as a composition constraint: plan framing, subject scale, visual balance, crop boundaries, and negative space so the main subject remains readable within the frame."
+        )
         content = [{"type": "text", "text": (
             f"Original user request:\n{request}\n\nGenerate exactly {count} distinct image-generation prompts. "
             "Improve the idea with tasteful creative direction using a structured subject-first workflow: identify the main subject and action, then composition, camera/viewpoint, environment, lighting, color palette, materials, mood, and rendering/style cues. "
+            f"{framing_instruction} "
             "Each prompt must be self-contained and directly usable by an image model. "
             "Use only positive visual descriptions; never output negative prompts, negative tags, exclusions, or a separate negative-prompt field. "
             "Do not add explanations, numbering, markdown fences, or commentary. Return one prompt per line."
