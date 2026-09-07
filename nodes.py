@@ -5,10 +5,13 @@ import re
 import time
 import json
 import urllib.request
+import os
+import hashlib
 from pathlib import Path
 
 import numpy as np
 from PIL import Image
+from PIL.PngImagePlugin import PngInfo
 
 import comfy.model_management as mm
 import folder_paths
@@ -565,6 +568,86 @@ def _quality_errors(text, duration):
     return errors
 
 
+class H3SaveImage:
+    """Save images as PNG/JPG/WEBP, with optional workflow sidecar JSON."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "images": ("IMAGE",),
+                "Filename Prefix": ("STRING", {"default": "H3", "multiline": False}),
+                "Output Folder": ("STRING", {"default": "", "multiline": False, "placeholder": "Relative to ComfyUI/output"}),
+                "Format": (["PNG", "JPG", "WEBP"], {"default": "PNG"}),
+                "JPG Quality": ("INT", {"default": 95, "min": 1, "max": 100, "step": 1}),
+                "Save Workflow JSON": ("BOOLEAN", {"default": False}),
+            },
+            "hidden": {"prompt": "PROMPT", "extra_pnginfo": "EXTRA_PNGINFO"},
+        }
+
+    RETURN_TYPES = ()
+    FUNCTION = "save_images"
+    OUTPUT_NODE = True
+    CATEGORY = "MiniMax H3/Output"
+
+    @staticmethod
+    def _safe_output_dir(folder):
+        root = os.path.abspath(folder_paths.get_output_directory())
+        folder = (folder or "").strip().replace("/", os.sep).replace("\\", os.sep)
+        target = os.path.abspath(os.path.join(root, folder)) if folder else root
+        if os.path.commonpath((root, target)) != root:
+            raise ValueError("Output Folder must stay inside ComfyUI/output.")
+        os.makedirs(target, exist_ok=True)
+        return target
+
+    @staticmethod
+    def _prefix(value):
+        value = (value or "H3").strip().replace("/", "_").replace("\\", "_")
+        value = re.sub(r"[^\w .()\-\u4e00-\u9fff]", "_", value).strip(" .")
+        return value or "H3"
+
+    def save_images(self, images, **inputs):
+        output_dir = self._safe_output_dir(inputs.get("Output Folder", ""))
+        prefix = self._prefix(inputs.get("Filename Prefix", "H3"))
+        fmt = inputs.get("Format", "PNG").upper()
+        quality = int(inputs.get("JPG Quality", 95))
+        save_json = bool(inputs.get("Save Workflow JSON", False))
+        prompt = inputs.get("prompt")
+        extra = inputs.get("extra_pnginfo") or {}
+        workflow = extra.get("workflow") if isinstance(extra, dict) else None
+        results = []
+        extension = {"PNG": ".png", "JPG": ".jpg", "WEBP": ".webp"}[fmt]
+        for index, tensor in enumerate(images, start=1):
+            array = np.clip(tensor.detach().cpu().numpy() * 255.0, 0, 255).astype(np.uint8)
+            image = Image.fromarray(array, "RGB")
+            stem = f"{prefix}_{index:05d}"
+            path = os.path.join(output_dir, stem + extension)
+            counter = 1
+            while os.path.exists(path):
+                path = os.path.join(output_dir, f"{stem}_{counter:03d}{extension}")
+                counter += 1
+            save_kwargs = {}
+            if fmt == "PNG":
+                metadata = PngInfo()
+                if prompt is not None:
+                    metadata.add_text("prompt", json.dumps(prompt, ensure_ascii=False))
+                if isinstance(extra, dict):
+                    for key, value in extra.items():
+                        metadata.add_text(str(key), json.dumps(value, ensure_ascii=False))
+                save_kwargs = {"pnginfo": metadata, "compress_level": 4}
+            elif fmt == "JPG":
+                save_kwargs = {"quality": quality, "optimize": True}
+            else:
+                save_kwargs = {"quality": quality, "method": 6}
+            image.save(path, format=fmt, **save_kwargs)
+            results.append({"filename": os.path.basename(path), "subfolder": os.path.relpath(output_dir, folder_paths.get_output_directory()), "type": "output"})
+            if save_json and isinstance(workflow, dict):
+                json_path = os.path.splitext(path)[0] + ".json"
+                with open(json_path, "w", encoding="utf-8") as handle:
+                    json.dump(workflow, handle, ensure_ascii=False, indent=2)
+        return {"ui": {"images": results}}
+
+
 class Qwen36MultiImageH3ChinesePrompt:
     @classmethod
     def INPUT_TYPES(cls):
@@ -805,8 +888,10 @@ class Qwen36MultiImageH3ChinesePrompt:
 
 NODE_CLASS_MAPPINGS = {
     "H3Prompt": Qwen36MultiImageH3ChinesePrompt,
+    "H3SaveImage": H3SaveImage,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "H3Prompt": "H3 Prompt",
+    "H3SaveImage": "H3 Save Image",
 }
