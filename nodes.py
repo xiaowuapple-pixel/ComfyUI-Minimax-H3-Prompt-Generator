@@ -621,15 +621,25 @@ class H3SaveImage:
         workflow = extra.get("workflow") if isinstance(extra, dict) else None
         results = []
         extension = {"PNG": ".png", "JPG": ".jpg", "WEBP": ".webp"}[fmt]
+        # Continue the numeric sequence for this prefix. Include sidecar JSON
+        # files in the scan so image/workflow pairs always share one number.
+        prefix_pattern = re.compile(r"^" + re.escape(prefix) + r"_(\d+)(?:_\d+)?(?:\.[^.]+)$", re.IGNORECASE)
+        next_number = 1
+        for existing in os.listdir(output_dir):
+            match = prefix_pattern.match(existing)
+            if match:
+                next_number = max(next_number, int(match.group(1)) + 1)
         for index, tensor in enumerate(images, start=1):
             array = np.clip(tensor.detach().cpu().numpy() * 255.0, 0, 255).astype(np.uint8)
             image = Image.fromarray(array, "RGB")
-            stem = f"{prefix}_{index:05d}"
+            stem = f"{prefix}_{next_number:05d}"
             path = os.path.join(output_dir, stem + extension)
-            counter = 1
-            while os.path.exists(path):
-                path = os.path.join(output_dir, f"{stem}_{counter:03d}{extension}")
-                counter += 1
+            # A concurrent writer may claim the number between the directory
+            # scan and save; advance the number instead of adding a suffix.
+            while os.path.exists(path) or (save_json and os.path.exists(os.path.splitext(path)[0] + ".json")):
+                next_number += 1
+                stem = f"{prefix}_{next_number:05d}"
+                path = os.path.join(output_dir, stem + extension)
             save_kwargs = {}
             if fmt == "PNG":
                 metadata = PngInfo()
@@ -658,6 +668,7 @@ class H3SaveImage:
                 json_path = os.path.splitext(path)[0] + ".json"
                 with open(json_path, "w", encoding="utf-8") as handle:
                     json.dump(workflow, handle, ensure_ascii=False, indent=2)
+            next_number += 1
         return {"ui": {"images": results}}
 
 
