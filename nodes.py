@@ -966,8 +966,8 @@ class H3ImagePromptGenerator:
             f"{framing_instruction} "
             "Each prompt must be self-contained and directly usable by an image model. "
             + literal_instruction
-            "Use only positive visual descriptions; never output negative prompts, negative tags, exclusions, or a separate negative-prompt field. "
-            "Do not add explanations, numbering, markdown fences, or commentary. Return one prompt per line."
+            + "Use only positive visual descriptions; never output negative prompts, negative tags, exclusions, or a separate negative-prompt field. "
+            + "Do not add explanations, numbering, markdown fences, or commentary. Return one prompt per line."
         )}]
         if images:
             content[0]["text"] += "\nReference images are provided. Identify visible people, scene, objects, clothing, colors and style, and incorporate only supported traits into the prompts."
