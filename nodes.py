@@ -253,12 +253,18 @@ def _create_chat_handler(model_name, mmproj_path):
     return MTMDChatHandler(use_gpu=True, **common)
 
 
+# Context window sizes offered by the nodes. A larger window needs more VRAM for
+# the KV cache, so a smaller one lets a bigger model stay on the GPU.
+CONTEXT_LENGTH_OPTIONS = ("4096", "6144", "8192", "12288", "16384", "24576", "32768", "49152", "65536")
+DEFAULT_CONTEXT_LENGTH = 12288
+
+
 class _VisionRuntime:
     llm = None
     chat_handler = None
 
     @classmethod
-    def load(cls, model_relative_path, vision_relative_path, gpu_layers):
+    def load(cls, model_relative_path, vision_relative_path, gpu_layers, context_length=DEFAULT_CONTEXT_LENGTH):
         if _LLAMA_CPP_IMPORT_ERROR is not None:
             raise RuntimeError(
                 "本地 GGUF 模式需要安装 llama-cpp-python>=0.3.46；"
@@ -277,12 +283,18 @@ class _VisionRuntime:
         print(f"[H3 中文提示词] 视觉模型：{mmproj_path.name}")
         print(f"[H3 中文提示词] GPU 卸载层数：{gpu_layers}")
         try:
+            n_ctx = int(context_length)
+        except (TypeError, ValueError):
+            n_ctx = DEFAULT_CONTEXT_LENGTH
+        n_ctx = max(512, n_ctx)
+        print(f"[H3 中文提示词] 上下文长度：{n_ctx}")
+        try:
             cls.chat_handler = _create_chat_handler(model_relative_path, mmproj_path)
             cls.llm = Llama(
                 model_path=str(model_path),
                 chat_handler=cls.chat_handler,
                 n_gpu_layers=gpu_layers,
-                n_ctx=12288,
+                n_ctx=n_ctx,
                 verbose=False,
             )
         except Exception:
@@ -447,6 +459,26 @@ def _looks_like_internal_text(text):
         "your request (the",
     )
     return sum(marker in lowered for marker in markers) >= 2
+
+
+def _context_length(inputs, default=DEFAULT_CONTEXT_LENGTH):
+    raw = _input_value(inputs, "Context Length", "上下文长度", default)
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return default
+    return value if value >= 512 else default
+
+
+def _completion_budget(context_length, requested):
+    """Keep one reply inside the configured window.
+
+    Half of the window is reserved for the instructions, the reference media and
+    the material already produced, so a small context length trims the reply
+    budget instead of letting a response run out of room halfway through.
+    """
+    limit = max(512, int(context_length) // 2)
+    return max(256, min(int(requested), limit))
 
 
 def _stream_completion(llm, messages, stage, **parameters):
@@ -737,6 +769,15 @@ class Qwen36MultiImageH3ChinesePrompt:
                     {"default": "自动判别"},
                 ),
                 "Unload Model After Generation": ("BOOLEAN", {"default": True}),
+                "Context Length": (
+                    list(CONTEXT_LENGTH_OPTIONS),
+                    {
+                        "default": str(DEFAULT_CONTEXT_LENGTH),
+                        "tooltip": "模型上下文窗口，同时决定 KV 缓存的显存占用。默认 12288；"
+                                   "显存不足时可降到 8192 或 6144 给权重腾出空间，"
+                                   "长对白或多参考图时再调高。",
+                    },
+                ),
             },
             "optional": {
                 **{f"Image {index}": ("IMAGE",) for index in range(1, 10)},
@@ -756,6 +797,7 @@ class Qwen36MultiImageH3ChinesePrompt:
         model_name = _input_value(inputs, "Language Model", "语言模型")
         vision_name = _input_value(inputs, "Vision Model", "视觉模型")
         gpu_layers = _input_value(inputs, "GPU Offload Layers", "GPU卸载层数", -1)
+        context_length = _context_length(inputs)
         seed = _input_value(inputs, "Seed", "种子", 0)
         generation_type = _input_value(inputs, "Generation Type", "生成类型", "Auto Detect")
         if not online_source and (model_name == "未找到语言模型" or vision_name == "未找到视觉模型"):
@@ -824,7 +866,7 @@ class Qwen36MultiImageH3ChinesePrompt:
                 _input_value(inputs, "Online Model", "在线模型", ""),
             )
         else:
-            llm = _VisionRuntime.load(model_name, vision_name, gpu_layers)
+            llm = _VisionRuntime.load(model_name, vision_name, gpu_layers, context_length)
         try:
             analysis_messages = [
                 {"role": "system", "content": ANALYSIS_PROMPT},
@@ -835,7 +877,7 @@ class Qwen36MultiImageH3ChinesePrompt:
                 messages=analysis_messages,
                 stage="参考图分析",
                 seed=seed,
-                max_tokens=1024,
+                max_tokens=_completion_budget(context_length, 1024),
                 temperature=0.25,
                 top_p=0.9,
                 repeat_penalty=1.08,
@@ -862,7 +904,7 @@ class Qwen36MultiImageH3ChinesePrompt:
                 messages=messages,
                 stage="最终提示词",
                 seed=(seed + 1) & 0xFFFFFFFFFFFFFFFF,
-                max_tokens=3072,
+                max_tokens=_completion_budget(context_length, 3072),
                 temperature=0.45,
                 top_p=0.9,
                 repeat_penalty=1.12,
@@ -900,7 +942,7 @@ class Qwen36MultiImageH3ChinesePrompt:
                     ],
                     stage="正文补写",
                     seed=(seed + 2) & 0xFFFFFFFFFFFFFFFF,
-                    max_tokens=2048,
+                    max_tokens=_completion_budget(context_length, 2048),
                     temperature=0.4,
                     top_p=0.9,
                     repeat_penalty=1.15,
@@ -946,6 +988,14 @@ class H3ImagePromptGenerator:
             "Online API Key": ("STRING", {"default": "", "multiline": False, "password": True}),
             "Online Model": ("STRING", {"default": "", "multiline": False}),
             "Output Chinese": ("BOOLEAN", {"default": False}),
+            "Context Length": (
+                list(CONTEXT_LENGTH_OPTIONS),
+                {
+                    "default": str(DEFAULT_CONTEXT_LENGTH),
+                    "tooltip": "模型上下文窗口，同时决定 KV 缓存的显存占用。默认 12288；"
+                               "显存不足时可降到 8192 或 6144 给模型权重腾出空间。",
+                },
+            ),
         }, "optional": {"Image 1": ("IMAGE",), "Image 2": ("IMAGE",)}}
 
     RETURN_TYPES = ("STRING",)
@@ -970,6 +1020,7 @@ class H3ImagePromptGenerator:
             raise ValueError("Original Request cannot be empty.")
         count = int(inputs.get("Prompt Count", 4))
         seed = int(inputs.get("Seed", -1))
+        context_length = _context_length(inputs)
         actual_seed = random.SystemRandom().randint(0, 0xFFFFFFFF) if seed == -1 else seed
         prompt_format = inputs.get("Prompt Format", "Natural Language")
         tag_mode = prompt_format == "SDXL / Illustrious / NoobAI Tags"
@@ -1024,11 +1075,18 @@ class H3ImagePromptGenerator:
         else:
             if inputs.get("Language Model") in {"No language models found", None}:
                 raise FileNotFoundError("No local language model was found.")
-            llm = _VisionRuntime.load(inputs["Language Model"], inputs["Vision Model"], inputs["GPU Offload Layers"])
+            llm = _VisionRuntime.load(
+                inputs["Language Model"], inputs["Vision Model"],
+                inputs["GPU Offload Layers"], context_length,
+            )
         try:
             system = {"role": "system", "content": "You are an expert image prompt writer."}
             messages = [system, {"role": "user", "content": content}]
-            completion_parameters = {"max_tokens": 4096, "temperature": 0.8, "top_p": 0.95}
+            completion_parameters = {
+                "max_tokens": _completion_budget(context_length, 4096),
+                "temperature": 0.8,
+                "top_p": 0.95,
+            }
             completion_parameters["seed"] = actual_seed
 
             def parse_prompts(text):
@@ -1059,7 +1117,7 @@ class H3ImagePromptGenerator:
                 try:
                     retry_parameters = dict(completion_parameters)
                     retry_parameters["seed"] = (actual_seed + index) & 0xFFFFFFFF
-                    retry_parameters["max_tokens"] = 2048
+                    retry_parameters["max_tokens"] = _completion_budget(context_length, 2048)
                     retry_parameters["temperature"] = 0.85
                     extra = _stream_completion(
                         llm, [system, {"role": "user", "content": retry_content}],
