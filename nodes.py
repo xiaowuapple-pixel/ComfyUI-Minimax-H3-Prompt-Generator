@@ -73,7 +73,8 @@ non_diegetic_music:
    不要为了凑字数强行增加镜头或重复描述。每个镜头明确交代必要的构图、主体动作、环境、运镜和声音；
    短视频可以只有一个镜头。
 8. 有真实对白时，按首次发声顺序分配稳定的 (S1)、(S2) 编号，并使用
-   <d>[Chinese]对白原文</d>。用户没有要求对白时不要擅自添加。
+   <d>[Chinese]对白原文</d>。用户输入引号内的对白必须逐字、完整复制，禁止省略号、概括、改写或截断；
+   若篇幅不足，删减镜头细节而不是删减对白。用户没有要求对白时不要擅自添加。
 9. overall_soundscape 只总结环境声和物理音效，不重复对白，也不写观众才能听见的配乐。
 10. non_diegetic_music 描述非画内配乐的乐器、速度和动态发展；不需要配乐时写 N/A。
 11. 不虚构图片中无法支持的身份、品牌、文字或关键外貌。用户描述含糊时，将其补全为连贯、
@@ -737,7 +738,11 @@ class Qwen36MultiImageH3ChinesePrompt:
                 ),
                 "Unload Model After Generation": ("BOOLEAN", {"default": True}),
             },
-            "optional": {f"Image {index}": ("IMAGE",) for index in range(1, 10)},
+            "optional": {
+                **{f"Image {index}": ("IMAGE",) for index in range(1, 10)},
+                **{f"Video {index}": ("VIDEO",) for index in range(1, 4)},
+                **{f"Audio {index}": ("AUDIO",) for index in range(1, 4)},
+            },
         }
 
     RETURN_TYPES = ("STRING",)
@@ -756,6 +761,13 @@ class Qwen36MultiImageH3ChinesePrompt:
         if not online_source and (model_name == "未找到语言模型" or vision_name == "未找到视觉模型"):
             raise FileNotFoundError("请将 GGUF 语言模型和对应 mmproj 视觉模型放入 models/LLM。")
         images = _collect_images(inputs, allow_empty=generation_type in {"自动判别", "文生视频", "Auto Detect", "Text-to-Video"})
+        videos = [inputs.get(f"Video {index}") for index in range(1, 4) if inputs.get(f"Video {index}") is not None]
+        audios = [inputs.get(f"Audio {index}") for index in range(1, 4) if inputs.get(f"Audio {index}") is not None]
+        media_tags = ""
+        if videos:
+            media_tags += "\n已连接视频输入：" + ", ".join(f"<Video {index}>" for index in range(1, len(videos) + 1)) + "。必须使用这些标签，不得写成 Picture。"
+        if audios:
+            media_tags += "\n已连接音频输入：" + ", ".join(f"<Audio {index}>" for index in range(1, len(audios) + 1)) + "。必须使用这些标签，不得写成 Picture N/A。音频用于用户指定的对白、语音、歌词和节奏。"
         # With no reference image, automatic mode is a true text-to-video task.
         if not images and generation_type in {"自动判别", "Auto Detect"}:
             generation_type = "Text-to-Video"
@@ -785,7 +797,7 @@ class Qwen36MultiImageH3ChinesePrompt:
         analysis_request = (
             f"目标视频总时长：{duration:g} 秒\n目标画面比例：{aspect_ratio}\n"
             f"参考图片数量：{len(images)}\n用户的简单描述：{description}\n"
-            f"指定生成类型：{generation_type}\n生成类型要求：{generation_instruction}"
+            f"指定生成类型：{generation_type}\n生成类型要求：{generation_instruction}{media_tags}"
             f"\n指定创意技能：{creative_skill}\n创意技能要求：{creative_instruction}"
         )
         content = [{"type": "text", "text": analysis_request}]
@@ -799,6 +811,8 @@ class Qwen36MultiImageH3ChinesePrompt:
                     "image_url": {"url": _tensor_to_data_url(image)},
                 }
             )
+        if videos or audios:
+            content.append({"type": "text", "text": "媒体引用规则：严格按连接顺序使用 <Picture N>、<Video N>、<Audio N>。不要把音频或视频写成 <Picture N/A>。用户提到的音频/视频必须在 subject_definitions、summary 或镜头描述中明确引用。"})
 
         if online_source:
             api_key = _input_value(inputs, "Online API Key", "在线APIKey", "")
