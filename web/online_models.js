@@ -72,6 +72,7 @@ function installOnlineModelPicker(nodeType, appendButton) {
             values: savedModel ? [savedModel] : [],
             tooltip: "在线模型名称。先点击下方按钮刷新，再在下拉列表中选择。",
         });
+        combo.tooltip = "在线模型名称。先点击下方按钮刷新，再在下拉列表中选择。";
         this.widgets.splice(this.widgets.indexOf(combo), 1);
         this.widgets.splice(modelIndex, 0, combo);
 
@@ -96,6 +97,7 @@ function installOnlineModelPicker(nodeType, appendButton) {
             },
             { tooltip: "使用上面的请求地址和 API Key 拉取在线平台的可用模型列表。" }
         );
+        refresh.tooltip = "使用上面的请求地址和 API Key 拉取在线平台的可用模型列表。";
 
         if (!appendButton) {
             const refreshIndex = this.widgets.indexOf(refresh);
