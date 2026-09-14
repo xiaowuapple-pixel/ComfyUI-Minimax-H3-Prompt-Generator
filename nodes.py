@@ -2,6 +2,7 @@ import base64
 import gc
 import io
 import re
+import struct
 import time
 import json
 import urllib.request
@@ -229,25 +230,75 @@ def _vision_models():
     return sorted(models, key=str.lower)
 
 
-def _create_chat_handler(model_name, mmproj_path):
+def _gguf_read_string(handle):
+    size = struct.unpack("<Q", handle.read(8))[0]
+    return handle.read(size).decode("utf-8", "replace")
+
+
+def _gguf_read_value(handle, kind):
+    fixed = {
+        0: "<B", 1: "<b", 2: "<H", 3: "<h", 4: "<I", 5: "<i",
+        6: "<f", 7: "<B", 10: "<Q", 11: "<q", 12: "<d",
+    }
+    if kind in fixed:
+        fmt = fixed[kind]
+        return struct.unpack(fmt, handle.read(struct.calcsize(fmt)))[0]
+    if kind == 8:
+        return _gguf_read_string(handle)
+    if kind == 9:
+        element = struct.unpack("<I", handle.read(4))[0]
+        for _ in range(struct.unpack("<Q", handle.read(8))[0]):
+            _gguf_read_value(handle, element)
+        return None
+    raise ValueError(f"unknown GGUF metadata type {kind}")
+
+
+def _gguf_architecture(model_path):
+    """Read `general.architecture` from a GGUF header without loading weights.
+
+    The chat handler has to be chosen before the model is loaded, and file names
+    are unreliable (a Qwen3.8 file still reports architecture `qwen35`).
+    """
+    if not model_path:
+        return ""
+    try:
+        with open(model_path, "rb") as handle:
+            if handle.read(4) != b"GGUF":
+                return ""
+            struct.unpack("<I", handle.read(4))[0]
+            struct.unpack("<Q", handle.read(8))[0]
+            for _ in range(struct.unpack("<Q", handle.read(8))[0]):
+                key = _gguf_read_string(handle)
+                value = _gguf_read_value(handle, struct.unpack("<I", handle.read(4))[0])
+                if key == "general.architecture":
+                    return str(value or "").lower()
+    except Exception:
+        return ""
+    return ""
+
+
+def _create_chat_handler(model_name, mmproj_path, enable_thinking=False):
     if _LLAMA_CPP_IMPORT_ERROR is not None:
         raise RuntimeError(
             "本地 GGUF 模式需要安装 llama-cpp-python>=0.3.46；"
             "在线 OpenAI 兼容 API 模式无需此依赖。"
         ) from _LLAMA_CPP_IMPORT_ERROR
     name = Path(model_name).name.lower()
+    family = _gguf_architecture(_resolve_llm_path(model_name)) or name
     common = {
         "clip_model_path": str(mmproj_path),
         "image_min_tokens": 0,
         "image_max_tokens": 0,
         "verbose": False,
     }
-    if "qwen3.6" in name or "qwen3.5" in name:
-        return Qwen35ChatHandler(enable_thinking=False, **common)
-    if "qwen3-vl" in name or "qwen3_vl" in name:
-        return Qwen3VLChatHandler(force_reasoning=False, **common)
+    if "qwen35" in family or "qwen3_5" in family or any(
+        version in name for version in ("qwen3.5", "qwen3.6", "qwen3.7", "qwen3.8", "qwen3.9")
+    ):
+        return Qwen35ChatHandler(enable_thinking=enable_thinking, **common)
+    if "qwen3vl" in family or "qwen3-vl" in name or "qwen3_vl" in name:
+        return Qwen3VLChatHandler(force_reasoning=enable_thinking, **common)
     if "gemma-4" in name or "gemma4" in name:
-        return Gemma4ChatHandler(enable_thinking=False, **common)
+        return Gemma4ChatHandler(enable_thinking=enable_thinking, **common)
     if "gemma-3" in name or "gemma3" in name:
         return Gemma3ChatHandler(**common)
     return MTMDChatHandler(use_gpu=True, **common)
@@ -264,7 +315,14 @@ class _VisionRuntime:
     chat_handler = None
 
     @classmethod
-    def load(cls, model_relative_path, vision_relative_path, gpu_layers, context_length=DEFAULT_CONTEXT_LENGTH):
+    def load(
+        cls,
+        model_relative_path,
+        vision_relative_path,
+        gpu_layers,
+        context_length=DEFAULT_CONTEXT_LENGTH,
+        enable_thinking=False,
+    ):
         if _LLAMA_CPP_IMPORT_ERROR is not None:
             raise RuntimeError(
                 "本地 GGUF 模式需要安装 llama-cpp-python>=0.3.46；"
@@ -288,8 +346,9 @@ class _VisionRuntime:
             n_ctx = DEFAULT_CONTEXT_LENGTH
         n_ctx = max(512, n_ctx)
         print(f"[H3 中文提示词] 上下文长度：{n_ctx}")
+        print(f"[H3 中文提示词] 思考模式：{'开启' if enable_thinking else '关闭'}")
         try:
-            cls.chat_handler = _create_chat_handler(model_relative_path, mmproj_path)
+            cls.chat_handler = _create_chat_handler(model_relative_path, mmproj_path, enable_thinking)
             cls.llm = Llama(
                 model_path=str(model_path),
                 chat_handler=cls.chat_handler,
@@ -422,7 +481,10 @@ def _clean_output(text):
     text = (text or "").strip()
     text = re.sub(r"^```(?:text)?\s*", "", text, flags=re.IGNORECASE)
     text = re.sub(r"\s*```$", "", text)
-    text = re.sub(r"<think>.*?</think>\s*", "", text, flags=re.DOTALL | re.IGNORECASE)
+    text = re.sub(r"<think\b[^>]*>.*?</think\s*>", "", text, flags=re.DOTALL | re.IGNORECASE)
+    # A reasoning block that was cut off at the token limit has no closing tag.
+    # Drop it so private reasoning never reaches the prompt output.
+    text = re.sub(r"<think\b.*\Z", "", text, flags=re.DOTALL | re.IGNORECASE)
     return text.strip()
 
 
@@ -778,6 +840,16 @@ class Qwen36MultiImageH3ChinesePrompt:
                                    "长对白或多参考图时再调高。",
                     },
                 ),
+                "Enable Thinking": (
+                    "BOOLEAN",
+                    {
+                        "default": False,
+                        "label_on": "Thinking",
+                        "label_off": "Direct",
+                        "tooltip": "开启后让模型先内部推理再输出，适合 Qwen3.8 蒸馏等推理模型；"
+                                   "推理内容不会写进提示词。普通 instruct 模型保持关闭即可。",
+                    },
+                ),
             },
             "optional": {
                 **{f"Image {index}": ("IMAGE",) for index in range(1, 10)},
@@ -798,6 +870,7 @@ class Qwen36MultiImageH3ChinesePrompt:
         vision_name = _input_value(inputs, "Vision Model", "视觉模型")
         gpu_layers = _input_value(inputs, "GPU Offload Layers", "GPU卸载层数", -1)
         context_length = _context_length(inputs)
+        enable_thinking = bool(_input_value(inputs, "Enable Thinking", "启用思考", False))
         seed = _input_value(inputs, "Seed", "种子", 0)
         generation_type = _input_value(inputs, "Generation Type", "生成类型", "Auto Detect")
         if not online_source and (model_name == "未找到语言模型" or vision_name == "未找到视觉模型"):
@@ -866,7 +939,9 @@ class Qwen36MultiImageH3ChinesePrompt:
                 _input_value(inputs, "Online Model", "在线模型", ""),
             )
         else:
-            llm = _VisionRuntime.load(model_name, vision_name, gpu_layers, context_length)
+            llm = _VisionRuntime.load(
+                model_name, vision_name, gpu_layers, context_length, enable_thinking
+            )
         try:
             analysis_messages = [
                 {"role": "system", "content": ANALYSIS_PROMPT},
@@ -996,6 +1071,16 @@ class H3ImagePromptGenerator:
                                "显存不足时可降到 8192 或 6144 给模型权重腾出空间。",
                 },
             ),
+            "Enable Thinking": (
+                "BOOLEAN",
+                {
+                    "default": False,
+                    "label_on": "Thinking",
+                    "label_off": "Direct",
+                    "tooltip": "开启后让模型先内部推理再输出，适合 Qwen3.8 蒸馏等推理模型；"
+                               "推理内容不会写进提示词。普通 instruct 模型保持关闭即可。",
+                },
+            ),
         }, "optional": {"Image 1": ("IMAGE",), "Image 2": ("IMAGE",)}}
 
     RETURN_TYPES = ("STRING",)
@@ -1021,6 +1106,7 @@ class H3ImagePromptGenerator:
         count = int(inputs.get("Prompt Count", 4))
         seed = int(inputs.get("Seed", -1))
         context_length = _context_length(inputs)
+        enable_thinking = bool(_input_value(inputs, "Enable Thinking", "启用思考", False))
         actual_seed = random.SystemRandom().randint(0, 0xFFFFFFFF) if seed == -1 else seed
         prompt_format = inputs.get("Prompt Format", "Natural Language")
         tag_mode = prompt_format == "SDXL / Illustrious / NoobAI Tags"
@@ -1077,7 +1163,7 @@ class H3ImagePromptGenerator:
                 raise FileNotFoundError("No local language model was found.")
             llm = _VisionRuntime.load(
                 inputs["Language Model"], inputs["Vision Model"],
-                inputs["GPU Offload Layers"], context_length,
+                inputs["GPU Offload Layers"], context_length, enable_thinking,
             )
         try:
             system = {"role": "system", "content": "You are an expert image prompt writer."}

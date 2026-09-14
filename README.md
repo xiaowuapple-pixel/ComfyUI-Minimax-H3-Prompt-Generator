@@ -29,6 +29,8 @@
 - 提供随机种子：固定种子可复现生成结果，设为 `-1` 时每次执行都会绕过缓存并重新随机
 - 提供「上下文长度」参数：决定 KV 缓存的显存占用，显存不足时调小可让更大的模型放进显卡
 - 上下文调小后会自动压缩单次输出上限，避免生成到一半被截断
+- 提供「Enable Thinking」开关（默认关闭）：开启后让推理模型先内部思考再输出，思考内容不会写进提示词
+- 按 GGUF 元数据识别模型架构，而不是文件名，所以 Qwen3.8 等新命名也能用上正确的对话模板
 - 两种格式均只输出正面提示词，不生成 negative prompt、negative tags 或排除项
 
 ### 安装与使用
@@ -81,6 +83,8 @@ generation-type selection, creative skill selection, and English/Chinese output.
 - A Seed control is available: fixed seeds improve reproducibility; `-1` bypasses the execution cache and selects a new random seed on every run
 - A Context Length control sets the KV-cache footprint, so a smaller window lets a larger model stay on the GPU
 - A smaller context length automatically trims the per-call reply budget so responses are not cut off halfway
+- An Enable Thinking switch (off by default) lets reasoning models think internally while the reasoning is kept out of the prompt output
+- The chat handler is chosen from the GGUF metadata rather than the file name, so newer names such as Qwen3.8 still get the correct chat template
 - Both formats output positive prompts only; no negative prompts, negative tags, or exclusions are generated
 
 ### Installation
