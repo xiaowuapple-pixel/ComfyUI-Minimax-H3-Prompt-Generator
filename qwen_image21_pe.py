@@ -1104,7 +1104,12 @@ class QwenImage21PromptEnhancer:
             presence_penalty = float(settings.get("presence_penalty", profile["presence_penalty"]))
 
         context_length = int(model.get("context_length") or DEFAULT_CONTEXT_LENGTH)
-        requested = int(settings.get("max_new_tokens", 0) or 0) or profile["max_new_tokens"]
+        # Only an explicit override is worth reporting on. Left at 0 the ceiling
+        # is still the official 16256 / 24000, which the context window trims to
+        # half -- normal, and the stream stops at the closing brace anyway, so
+        # warning about it on every run is just noise.
+        override = int(settings.get("max_new_tokens", 0) or 0)
+        requested = override or profile["max_new_tokens"]
         system_prompt = _load_system_prompt(task, model.get("system_prompt_file", ""))
         megapixels = float(inputs.get("Target Megapixels", 2.0) or 2.0)
         forced_ratio = inputs.get("Aspect Ratio", ASPECT_AUTO)
@@ -1124,9 +1129,9 @@ class QwenImage21PromptEnhancer:
             max_tokens = requested
         else:
             max_tokens = _completion_budget(context_length, requested)
-            if max_tokens < requested:
+            if max_tokens < requested and override:
                 print(
-                    f"[Qwen Image 2.1 PE] 上下文 {context_length} 放不下官方 {requested} 个新 token，"
+                    f"[Qwen Image 2.1 PE] 上下文 {context_length} 放不下你设定的 {requested} 个新 token，"
                     f"本次上限收敛为 {max_tokens}。需要更长输出请调大 Context Length。"
                 )
 
