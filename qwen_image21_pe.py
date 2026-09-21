@@ -29,7 +29,6 @@ import numpy as np
 from .nodes import (
     CONTEXT_LENGTH_OPTIONS,
     DEFAULT_CONTEXT_LENGTH,
-    _OnlineRuntime,
     _VisionRuntime,
     _completion_budget,
     _input_value,
@@ -59,8 +58,7 @@ MAX_INPUT_IMAGES = 4
 SOURCE_GGUF = "Local GGUF"
 SOURCE_CLIP = "Local safetensors (CLIP)"
 SOURCE_AUTO = "Local safetensors (auto)"
-SOURCE_ONLINE = "Online LLM"
-MODEL_SOURCES = [SOURCE_GGUF, SOURCE_AUTO, SOURCE_CLIP, SOURCE_ONLINE]
+MODEL_SOURCES = [SOURCE_AUTO, SOURCE_GGUF, SOURCE_CLIP]
 
 TASK_AUTO = "Auto (by images)"
 
@@ -130,6 +128,20 @@ def _text_encoder_choices():
     import folder_paths
 
     return folder_paths.get_filename_list("text_encoders") or ["No text encoders found"]
+
+
+def _pe_language_models():
+    """Only PE checkpoints are offered for the local GGUF path.
+
+    A stock Qwen3.5 (or any other instruct model) does follow the system prompt's
+    structure, but it was never trained against its answer contract, so it cannot
+    produce the JSON this node hands downstream. Listing it only invites a run
+    that costs minutes and returns a fallback. If no PE checkpoint is installed
+    yet the full list is shown, so the node stays usable while you download one.
+    """
+    models = _language_models()
+    pe = [name for name in models if "pe" in os.path.basename(name).lower()]
+    return pe or models
 
 
 def _default_encoder(names, marker):
@@ -506,7 +518,7 @@ class QwenImage21PromptEnhancer:
 
     @classmethod
     def INPUT_TYPES(cls):
-        models = _language_models() or ["No language models found"]
+        models = _pe_language_models() or ["No language models found"]
         vision_models = _vision_models() or ["No vision models found"]
         encoders = _text_encoder_choices()
         return {
@@ -557,10 +569,10 @@ class QwenImage21PromptEnhancer:
                     MODEL_SOURCES,
                     {
                         "default": SOURCE_GGUF,
-                        "tooltip": "Local GGUF：本地 GGUF 权重（llama.cpp）。"
-                                   "Local safetensors (CLIP)：用 CLIPLoader 加载官方 PE safetensors 后接到本节点的 clip 输入，"
-                                   "走 ComfyUI 原生推理（int8_convrot 可用）。"
-                                   "Online LLM：OpenAI 兼容接口（vLLM 起的 PE 服务等）。",
+                        "tooltip": "Local safetensors (auto)：节点自己按任务载入官方 PE 编码器，只驻留一个（推荐）。"
+                                   "Local GGUF：PE 权重的 GGUF 量化版，用下面的下拉选择；"
+                                   "列表里只会出现 PE 检查点，普通 Qwen3.5 之类的模型不适用。"
+                                   "Local safetensors (CLIP)：用 CLIPLoader 加载官方 PE 编码器后接到 clip 输入。",
                     },
                 ),
                 "Language Model": (models,),
@@ -574,9 +586,6 @@ class QwenImage21PromptEnhancer:
                                    "官方 t2i 允许 16256 个新 token，所以不要设得太小。",
                     },
                 ),
-                "Online Request URL": ("STRING", {"default": "https://api.openai.com/v1", "multiline": False}),
-                "Online API Key": ("STRING", {"default": "", "multiline": False, "password": True}),
-                "Online Model": ("STRING", {"default": "", "multiline": False}),
                 "System Prompt File": (
                     "STRING",
                     {
@@ -714,10 +723,7 @@ class QwenImage21PromptEnhancer:
 
         cache_key = None
         if bool(inputs.get("Use Cache", True)):
-            model_hint = {
-                SOURCE_GGUF: inputs.get("Language Model", ""),
-                SOURCE_ONLINE: inputs.get("Online Model", ""),
-            }.get(source, "clip")
+            model_hint = inputs.get("Language Model", "") if source == SOURCE_GGUF else "clip"
             cache_key = _cache_key(
                 task,
                 prompt,
@@ -813,30 +819,19 @@ class QwenImage21PromptEnhancer:
                 parsed, cache_key, task, prompt, images, megapixels, forced_ratio, forced_pair
             )
 
-        online = source == SOURCE_ONLINE
-        if online:
-            key = (inputs.get("Online API Key") or "").strip()
-            if not key:
-                raise ValueError("在线模式必须填写 API Key。")
-            llm = _OnlineRuntime(
-                inputs.get("Online Request URL", ""),
-                key,
-                inputs.get("Online Model", ""),
-            )
-        else:
-            model_name = inputs.get("Language Model")
-            vision_name = inputs.get("Vision Model")
-            if model_name in {"No language models found", None} or vision_name in {"No vision models found", None}:
-                raise FileNotFoundError("请先选择语言模型与配套的 mmproj 视觉模型。")
-            llm = _VisionRuntime.load(
-                model_name,
-                vision_name,
-                inputs.get("GPU Offload Layers", -1),
-                context_length,
-                # Both PE models were trained with the thinking block and degrade
-                # without it, so it is always on here.
-                True,
-            )
+        model_name = inputs.get("Language Model")
+        vision_name = inputs.get("Vision Model")
+        if model_name in {"No language models found", None} or vision_name in {"No vision models found", None}:
+            raise FileNotFoundError("请先选择 PE 语言模型与配套的 mmproj 视觉模型。")
+        llm = _VisionRuntime.load(
+            model_name,
+            vision_name,
+            inputs.get("GPU Offload Layers", -1),
+            context_length,
+            # Both PE models were trained with the thinking block and degrade
+            # without it, so it is always on here.
+            True,
+        )
         try:
             sampling = {
                 "max_tokens": max_tokens,
@@ -847,12 +842,9 @@ class QwenImage21PromptEnhancer:
                 "presence_penalty": presence_penalty,
                 "seed": seed,
             }
-            if online:
-                # vLLM / SGLang extensions: the served model keeps its thinking
-                # block on, exactly like the official client does.
-                sampling["chat_template_kwargs"] = {"enable_thinking": True}
-            else:
-                sampling = _adapt_sampling(llm, sampling)
+            # The local llama-cpp-python build exposes llama.cpp's own names, so
+            # map them before the call.
+            sampling = _adapt_sampling(llm, sampling)
             raw = _stream_completion(
                 llm,
                 messages,
@@ -860,7 +852,7 @@ class QwenImage21PromptEnhancer:
                 **sampling,
             )
         finally:
-            if not online and bool(inputs.get("Unload Model After Generation", True)):
+            if bool(inputs.get("Unload Model After Generation", True)):
                 _VisionRuntime.close()
 
         thinking, answer = _split_thinking(raw)

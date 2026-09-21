@@ -70,14 +70,17 @@ GPU 卸载层数默认为 `-1`，表示全部放入显存；显存不足时可�
 - 本地 GGUF 与在线 LLM 都支持，和 H3 Prompt 共用同一套运行时
 - 解析失败时 `Positive Prompt` 回退为原始回答文本，并输出 `Parse OK=false`，不会静默丢结果
 
-`Model Source` 三选一，推荐前两种本地方式：
+`Model Source` 三个选项，全部走本地：
 
 | 来源 | 怎么用 |
 | --- | --- |
 | `Local safetensors (auto)` | 节点自己按任务载入对应的 PE 编码器（只驻留一个），在 `T2I Encoder` / `I2I Encoder` 里选好两个文件即可，不用接 CLIPLoader |
 | `Local safetensors (CLIP)` | 用 CLIPLoader 加载官方 PE 编码器（类型选 `qwen_image`），把输出接到本节点的 `clip` 输入。走 ComfyUI 原生推理，int8_convrot 可用 |
 | `Local GGUF` | 下面表格里的 GGUF 量化版，用节点内的语言/视觉模型下拉选择 |
-| `Online LLM` | OpenAI 兼容接口，例如按官方 `serve.sh` 起的 PE 服务 |
+
+> 这个节点**只服务于 PE 权重**。在线 LLM 和普通 Qwen3.5 之类的通用模型已从节点里移除：
+> 它们能读到系统提示词、甚至能照结构输出，但没在这套答案契约上训练过，吐不出下游要的 JSON，
+> 跑一次要几分钟却只换来 `Parse OK=false`。GGUF 下拉里也只列出 PE 检查点。
 
 `Task` 默认是 `Auto (by images)`：**连了图片就走 edit，没连图片就走 t2i**，节点按这个自动选权重和系统提示词。
 两个 PE 编码器各 8.8 GB，不可能同时放进 16GB 显卡，所以节点全程只驻留一个：
@@ -120,8 +123,8 @@ GPU 卸载层数默认为 `-1`，表示全部放入显存；显存不足时可�
 2. **开 `Use Cache`（默认开启）**。相同请求 + 相同种子会直接复用上次结果，第二次起是毫秒级。
    反复调图时这个开关能省掉绝大部分等待。缓存放在 `ComfyUI/user/qwen_image21_pe_cache/`，
    要强制重新生成就关掉它或清空这个目录。
-3. **用在线接口**。把 PE 模型部署到更大的显卡上（官方 `serve.sh` + vLLM），
-   本节点用 `Online LLM` 调用，通常 20-40 秒。
+3. **换更大的显卡**。官方推荐把 bf16 权重用 `serve.sh` + vLLM 部署到 24-40GB 的卡上，
+   本节点不再内置在线调用，但那条路是"又快又对"的方向，16GB 卡上放不下。
 
 建议的本地模型（适配 16GB 显存，来源见下方链接）：
 
@@ -191,14 +194,17 @@ Qwen3.5-VL 9B) and turns a short request into the long prompt 2.1 expects.
 - Local GGUF and hosted LLM sources, sharing the same runtime as H3 Prompt
 - On a parse failure `Positive Prompt` falls back to the raw answer and `Parse OK` is false, so nothing is lost silently
 
-`Model Source` has four options; the first three run locally:
+`Model Source` has three options, all local:
 
 | Source | How |
 | --- | --- |
 | `Local safetensors (auto)` | The node loads the PE encoder for the task itself (only one resident at a time); pick both files under `T2I Encoder` / `I2I Encoder`, no CLIPLoader needed |
 | `Local safetensors (CLIP)` | Load the official PE encoder with CLIPLoader (type `qwen_image`) and wire its output into this node's `clip` input. Uses ComfyUI's own inference, so int8_convrot works |
 | `Local GGUF` | The GGUF quants below, picked from the in-node model dropdowns |
-| `Online LLM` | Any OpenAI-compatible endpoint, e.g. a PE server started with the official `serve.sh` |
+
+> This node serves PE checkpoints only. The online-LLM path and plain Qwen3.5-style models were removed:
+> they read the system prompt and even mirror its structure, but they were never trained on its answer
+> contract, so a run that costs minutes returns `Parse OK=false`. The GGUF dropdown lists PE checkpoints only.
 
 `Task` defaults to `Auto (by images)`: images connected means an edit request, no images means text-to-image,
 and the node picks the matching weights and system prompt by itself. The two PE encoders are 8.8 GB each and
