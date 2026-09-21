@@ -201,7 +201,14 @@ def _load_system_prompt(task, override_path):
     if not os.path.isfile(path):
         raise FileNotFoundError(f"系统提示词文件不存在：{path}")
     with open(path, encoding="utf-8") as handle:
-        return handle.read().strip()
+        prompt = handle.read().strip()
+    # Logged on every run so the question "did the rules actually reach the model"
+    # can be answered from the console instead of from the source.
+    print(
+        f"[Qwen Image 2.1 PE] 系统提示词：{os.path.basename(path)}"
+        f"（{len(prompt)} 字符，sha256 {hashlib.sha256(prompt.encode()).hexdigest()[:12]}）"
+    )
+    return prompt
 
 
 def _split_thinking(text):
