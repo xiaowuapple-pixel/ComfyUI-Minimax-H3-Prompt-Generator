@@ -935,7 +935,8 @@ class QwenImage21PromptEnhancer:
                     {
                         "default": True,
                         "tooltip": "相同的请求 + 相同的种子会直接复用上次结果，跳过这次生成。"
-                                   "一次扩写要一两分钟，反复调图时这个开关能省掉绝大部分等待。"
+                                   "注意 ComfyUI 自己也会缓存节点结果：输入没变时整张图都直接复用，"
+                                   "这时要把 Seed 设成 -1 才会重算（-1 会绕过 ComfyUI 的缓存）。"
                                    "缓存目录：ComfyUI/user/qwen_image21_pe_cache。",
                     },
                 ),
@@ -968,8 +969,9 @@ class QwenImage21PromptEnhancer:
                         "step": 1,
                         "tooltip": "输出几条提示词（列表形式，下游会按条数各跑一次）。"
                                    "官方契约要求一次回答只给一条，所以每条都是一次完整生成，"
-                                   "耗时基本线性叠加：t2i 每条约 20 秒，edit 约 45 秒。"
-                                   "同批各条用 Seed、Seed+1、Seed+2…，模型的载入只做一次。",
+                                   "耗时基本线性叠加：关掉思考时 t2i 每条约 7 秒、edit 约 8.5 秒"
+                                   "（打开 Think 则是 19 秒 / 52 秒）。"
+                                   "同批各条用 Seed、Seed+1、Seed+2…，模型全程只载入一次。",
                     },
                 ),
             },
@@ -1002,6 +1004,20 @@ class QwenImage21PromptEnhancer:
     FUNCTION = "enhance"
     CATEGORY = "MiniMax H3/Prompt"
     DESCRIPTION = "Official Qwen-Image-2.1 prompt enhancer (PE-T2I / PE-I2I). Connect a PE loader for the weights."
+
+    @classmethod
+    def IS_CHANGED(cls, **inputs):
+        """Make the -1 seed mode bypass ComfyUI's execution cache.
+
+        Without this, queueing twice with the same widgets reuses the previous
+        result without running anything, so -1 (a fresh roll every run) does not
+        actually roll again.
+        """
+        try:
+            seed = int(inputs.get("Seed", 42))
+        except (TypeError, ValueError):
+            seed = -1
+        return time.time_ns() if seed < 0 else seed
 
     def enhance(self, **inputs):
         count = max(1, int(inputs.get("Prompt Count", 1) or 1))
