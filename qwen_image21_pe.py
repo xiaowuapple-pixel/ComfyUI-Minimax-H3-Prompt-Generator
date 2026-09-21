@@ -78,6 +78,20 @@ SAMPLING_PRESET_DEFAULT = "Official defaults"
 
 _VISION_BLOCK = "<|vision_start|><|image_pad|><|vision_end|>"
 
+# How the assistant turn is pre-filled when the plan is switched off.
+#
+# These models were trained to plan first and answer second, and an empty think
+# block does not reliably stop that: measured on a five-image edit request, the
+# model ignored the pre-closed block and wrote a 5930-token plan anyway (83 s at
+# 76 tok/s). Opening the answer for it settles the question -- the same request
+# then produced 404 tokens in 9.6 s, at full speed and with the JSON contract
+# intact. Forcing the same thing with a GBNF grammar also worked but crushed
+# decoding to 9 tok/s, so the nudge is the one to keep.
+ANSWER_PREFILL = '{"rewritten_prompt": "'
+# The native path renders its template with `str.format`, so a literal brace has
+# to be doubled there or the tokenizer raises "unmatched '{' in format spec".
+ANSWER_PREFILL_TEMPLATE = ANSWER_PREFILL.replace("{", "{{").replace("}", "}}")
+
 # Sampling values are the production inference settings of each task, copied from
 # pe_core.py. They are not interchangeable: presence_penalty is 1.5 for t2i and
 # 0 for edit, and a wrong penalty does not fail loudly, it quietly changes the
@@ -349,6 +363,20 @@ def _parse_answer(answer, task):
     return {"positive_prompt": answer, "wh_ratio": "", "ratio_follow": "", "parse_ok": False}
 
 
+def _restore_prefill(text):
+    """Put the pre-filled opening back when the model continued from it.
+
+    Depending on how the chat template closes the pre-filled turn, the model
+    either repeats `{"rewritten_prompt": "` or carries straight on from it. Only
+    the second case needs the opening glued back on, and the guard matters: if
+    the model did plan anyway, prepending would swallow the real JSON and turn a
+    slow success into a parse failure.
+    """
+    if '"rewritten_prompt"' in text:
+        return text
+    return ANSWER_PREFILL + text
+
+
 def _answer_complete(text, thinking):
     """True once the answer's top-level JSON object has closed.
 
@@ -513,7 +541,7 @@ def _build_llama_template(system_prompt, image_count, thinking=False):
         "<|im_start|>user\n"
         f"{vision}{{}}<|im_end|>\n"
         "<|im_start|>assistant\n"
-        + ("<think>\n" if thinking else "<think>\n\n</think>\n\n")
+        + ("<think>\n" if thinking else "<think>\n\n</think>\n\n" + ANSWER_PREFILL_TEMPLATE)
     )
 
 
@@ -554,7 +582,10 @@ def _run_native_clip(clip, prompt, images, profile, system_prompt, sampling, thi
         # when it does not, which is what the official runners effectively do.
         mtp=True,
     )
-    return clip.decode(generated)
+    decoded = clip.decode(generated)
+    # The template ends inside the answer, so what comes back is the text after
+    # the opening we pre-filled.
+    return decoded if thinking else _restore_prefill(decoded)
 
 
 def _ratio_to_pair(text):
@@ -1185,6 +1216,10 @@ class QwenImage21PromptEnhancer:
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": content},
         ]
+        if not thinking:
+            # See ANSWER_PREFILL: without this the model plans anyway on complex
+            # requests, and the plan is where the minute goes.
+            messages.append({"role": "assistant", "content": ANSWER_PREFILL})
 
         if source == SOURCE_AUTO:
             encoder = _task_model(model, task)
@@ -1277,6 +1312,8 @@ class QwenImage21PromptEnhancer:
             if is_last and bool(model.get("unload", True)):
                 _VisionRuntime.close()
 
+        if not thinking:
+            raw = _restore_prefill(raw)
         thinking, answer = _split_thinking(raw)
         parsed = _parse_answer(answer, task)
         self._report(parsed)
