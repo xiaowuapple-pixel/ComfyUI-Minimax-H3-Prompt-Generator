@@ -1082,7 +1082,7 @@ class Qwen36MultiImageH3ChinesePrompt:
                         "min": -1,
                         "max": 256,
                         "step": 1,
-                        "tooltip": "-1=全部放入显存，0=全部使用内存/CPU。16GB 显存建议从 16-24 开始。",
+                        "tooltip": "-1=全放显存，0=全用内存。显存不够就调小。",
                     },
                 ),
                 "Seed": (
@@ -1093,7 +1093,7 @@ class Qwen36MultiImageH3ChinesePrompt:
                         "max": 0xFFFFFFFFFFFFFFFF,
                         "step": 1,
                         "control_after_generate": True,
-                        "tooltip": "可在生成后控制中选择随机、递增或固定。",
+                        "tooltip": "生成后控制：随机/递增/固定。",
                     },
                 ),
                 "Description": (
@@ -1133,9 +1133,7 @@ class Qwen36MultiImageH3ChinesePrompt:
                     list(CONTEXT_LENGTH_OPTIONS),
                     {
                         "default": str(DEFAULT_CONTEXT_LENGTH),
-                        "tooltip": "模型上下文窗口，同时决定 KV 缓存的显存占用。默认 12288；"
-                                   "显存不足时可降到 8192 或 6144 给权重腾出空间，"
-                                   "长对白或多参考图时再调高。",
+                        "tooltip": "上下文窗口，也决定 KV 显存占用。默认 12288，调大更占显存。",
                     },
                 ),
                 "Enable Thinking": (
@@ -1144,8 +1142,7 @@ class Qwen36MultiImageH3ChinesePrompt:
                         "default": False,
                         "label_on": "Thinking",
                         "label_off": "Direct",
-                        "tooltip": "开启后让模型先内部推理再输出，适合 Qwen3.8 蒸馏等推理模型；"
-                                   "推理内容不会写进提示词。普通 instruct 模型保持关闭即可。",
+                        "tooltip": "开启=先推理再输出（更慢、更细），推理内容不会写进提示词。",
                     },
                 ),
             },
@@ -1408,8 +1405,7 @@ class H3ImagePromptGenerator:
                 list(CONTEXT_LENGTH_OPTIONS),
                 {
                     "default": str(DEFAULT_CONTEXT_LENGTH),
-                    "tooltip": "模型上下文窗口，同时决定 KV 缓存的显存占用。默认 12288；"
-                               "显存不足时可降到 8192 或 6144 给模型权重腾出空间。",
+                    "tooltip": "上下文窗口，也决定 KV 显存占用。默认 12288，调大更占显存。",
                 },
             ),
             "Enable Thinking": (
@@ -1418,8 +1414,7 @@ class H3ImagePromptGenerator:
                     "default": False,
                     "label_on": "Thinking",
                     "label_off": "Direct",
-                    "tooltip": "开启后让模型先内部推理再输出，适合 Qwen3.8 蒸馏等推理模型；"
-                               "推理内容不会写进提示词。普通 instruct 模型保持关闭即可。",
+                    "tooltip": "开启=先推理再输出（更慢、更细），推理内容不会写进提示词。",
                 },
             ),
         }, "optional": {"Image 1": ("IMAGE",), "Image 2": ("IMAGE",)}}

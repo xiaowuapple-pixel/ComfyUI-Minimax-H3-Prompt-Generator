@@ -836,14 +836,14 @@ class QwenImage21PELoaderSafetensors:
                     encoders,
                     {
                         "default": _default_encoder(encoders, "pe_t2i"),
-                        "tooltip": "文生图任务用的 PE 编码器（text_encoders 里选）。",
+                        "tooltip": "文生图用的 PE 编码器。",
                     },
                 ),
                 "I2I Encoder": (
                     encoders,
                     {
                         "default": _default_encoder(encoders, "pe_i2i"),
-                        "tooltip": "带图改写任务用的 PE 编码器（text_encoders 里选）。",
+                        "tooltip": "带图改写用的 PE 编码器。",
                     },
                 ),
                 "System Prompt File": (
@@ -851,7 +851,7 @@ class QwenImage21PELoaderSafetensors:
                     {
                         "default": "",
                         "multiline": False,
-                        "tooltip": "留空则使用随权重配套的官方系统提示词。只有换权重时才需要指定。",
+                        "tooltip": "留空=用官方内置的系统提示词。",
                     },
                 ),
                 "Thinking": (
@@ -860,12 +860,10 @@ class QwenImage21PELoaderSafetensors:
                         "default": False,
                         "label_on": "Think",
                         "label_off": "Direct",
-                        "tooltip": "要不要让模型先内部推理再写答案。"
-                                   "关（Direct）：直接写答案，比 GGUF 快，实测带图改写约 29 秒，"
-                                   "但没有分析画面和权衡需求的机会，出来的提示词会明显变浅。"
-                                   "开（Think）：质量好得多，但原生推理拿不到流式输出、无法中途截断，"
+                        "tooltip": "关（Direct）=直接写答案，约 29 秒，提示词偏浅。"
+                                   "开（Think）=先推理，质量好得多，但这条原生路径无法限制规划长度，"
                                    "所以只能是完整思考——实测一次带图改写要十分钟以上。"
-                                   "要质量又要速度，请换上面的 GGUF 加载节点，那边有 Plan Tokens 可以限制规划长度。",
+                                   "要质量又要速度请用 GGUF 加载节点（那边有 Plan Tokens）。",
                     },
                 ),
                 "Unload Model After Generation": ("BOOLEAN", {"default": True}),
@@ -909,22 +907,21 @@ class QwenImage21PELoaderGGUF:
                     models,
                     {
                         "default": _default_encoder(models, "pe-t2i"),
-                        "tooltip": "文生图任务用的 PE-T2I GGUF（列表只列 PE 检查点）。",
+                        "tooltip": "文生图用的 PE-T2I GGUF。",
                     },
                 ),
                 "I2I GGUF": (
                     models,
                     {
                         "default": _default_encoder(models, "pe-i2i"),
-                        "tooltip": "带图改写任务用的 PE-I2I GGUF。两个都选好，任务由主节点自动判断。",
+                        "tooltip": "带图改写用的 PE-I2I GGUF，任务由主节点自动判断。",
                     },
                 ),
                 "Vision Model": (
                     vision_models,
                     {
                         "default": _default_vision_model(vision_models),
-                        "tooltip": "配套 mmproj 视觉模型。PE-I2I 的官方 mmproj 或任意 "
-                                   "Qwen3.5-9B 的 mmproj 都可以。",
+                        "tooltip": "配套 mmproj，默认已选 PE 那个。",
                     },
                 ),
                 "GPU Offload Layers": ("INT", {"default": -1, "min": -1, "max": 256, "step": 1}),
@@ -932,9 +929,7 @@ class QwenImage21PELoaderGGUF:
                     list(CONTEXT_LENGTH_OPTIONS),
                     {
                         "default": "16384",
-                        "tooltip": "模型上下文窗口。默认 16384：关掉思考后一次回复只有几百 token，"
-                                   "这个窗口省下约 3GB 显存，也不会拖慢速度。"
-                                   "只有打开 Think、或者提示词里塞了很长的参考素材时才需要调大。",
+                        "tooltip": "上下文窗口。默认 16384 够用且省显存，调大更占显存。",
                     },
                 ),
                 "System Prompt File": (
@@ -942,7 +937,7 @@ class QwenImage21PELoaderGGUF:
                     {
                         "default": "",
                         "multiline": False,
-                        "tooltip": "留空则使用随权重配套的官方系统提示词。只有换权重时才需要指定。",
+                        "tooltip": "留空=用官方内置的系统提示词。",
                     },
                 ),
                 "Thinking": (
@@ -951,10 +946,8 @@ class QwenImage21PELoaderGGUF:
                         "default": True,
                         "label_on": "Think",
                         "label_off": "Direct",
-                        "tooltip": "要不要让模型先内部推理再写答案。"
-                                   "关（Direct）最快，实测 t2i 约 7 秒、带图改写约 8 秒，"
-                                   "但它没有分析画面和权衡需求的机会，复杂请求出来的提示词会明显变浅。"
-                                   "开（Think）质量好得多，规划长度由下面的 Plan Tokens 控制。",
+                        "tooltip": "关（Direct）=直接写答案，最快但提示词偏浅（t2i 约 7 秒）。"
+                                   "开（Think）=先推理，质量好，长度看 Plan Tokens。",
                     },
                 ),
                 "Unload Model After Generation": ("BOOLEAN", {"default": True}),
@@ -1012,8 +1005,7 @@ class QwenImage21PESettings:
                     [SAMPLING_PRESET_DEFAULT, "Custom"],
                     {
                         "default": SAMPLING_PRESET_DEFAULT,
-                        "tooltip": "官方默认使用各任务的出厂参数（t2i 的 presence_penalty=1.5，edit 为 0）。"
-                                   "选 Custom 才使用下面那些数值。",
+                        "tooltip": "默认=官方出厂参数；Custom 才用下面的数值。",
                     },
                 ),
                 "Temperature": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.01}),
@@ -1027,8 +1019,7 @@ class QwenImage21PESettings:
                         "min": 0,
                         "max": 32768,
                         "step": 256,
-                        "tooltip": "0 = 使用官方默认（t2i 16256 / edit 24000），"
-                                   "并受上下文长度限制自动收敛。",
+                        "tooltip": "0=官方默认。数值越大越慢，一般不用改。",
                     },
                 ),
             },
@@ -1084,23 +1075,22 @@ class QwenImage21TextEncodeList:
     @classmethod
     def INPUT_TYPES(cls):
         optional = {
-            "vae": ("VAE", {"tooltip": "接上才会把参考图编成 reference latents（改图流程需要）。"}),
+            "vae": ("VAE", {"tooltip": "改图流程接上，参考图才会编成 reference latents。"}),
         }
         for index in range(1, MAX_INPUT_IMAGES + 1):
             optional[f"image_{index}"] = (
                 "IMAGE",
-                {"tooltip": f"参考图 {index}（最多 {MAX_INPUT_IMAGES} 张，连上一张才会出现下一张）。"},
+                {"tooltip": f"参考图 {index}，最多 {MAX_INPUT_IMAGES} 张。"},
             )
         return {
             "required": {
-                "clip": ("CLIP", {"tooltip": "Qwen Image 2.1 的文本编码器。"}),
+                "clip": ("CLIP", {"tooltip": "Qwen Image 2.1 文本编码器。"}),
                 "prompts": (
                     "STRING",
                     {
                         "multiline": True,
                         "default": "",
-                        "tooltip": "提示词。可以接提示词增强节点的 Positive Prompt（列表），"
-                                   "一条提示词会编成一份 conditioning。",
+                        "tooltip": "接增强节点的 Positive Prompt（列表），一条编一份 conditioning。",
                     },
                 ),
                 "negative_prompt": ("STRING", {"multiline": True, "default": ""}),
@@ -1111,8 +1101,7 @@ class QwenImage21TextEncodeList:
                         "min": 0,
                         "max": 4096,
                         "step": 32,
-                        "tooltip": "参考图会缩放到大约 resolution × resolution 像素（32 的倍数，保持比例）。"
-                                   "0 表示保持原尺寸，只补到 32 的倍数。",
+                        "tooltip": "参考图缩放到的边长（32 的倍数）。0=保持原尺寸。",
                     },
                 ),
             },
@@ -1231,11 +1220,11 @@ class PromptEnhancerReleaseTextEncoder:
             "required": {
                 "conditioning": (
                     "CONDITIONING",
-                    {"tooltip": "原样透传。把它串在文本编码之后、采样器之前，释放才会发生在正确的时刻。"},
+                    {"tooltip": "原样透传。串在文本编码之后、采样器之前。"},
                 ),
                 "clip": (
                     "CLIP",
-                    {"tooltip": "要释放的文本编码器，接 CLIPLoader 那一路（编码节点用的同一个）。"},
+                    {"tooltip": "要释放的文本编码器。"},
                 ),
             },
         }
@@ -1299,10 +1288,7 @@ class QwenImage21PromptEnhancer:
                     ALL_TASK_LABELS,
                     {
                         "default": TASK_AUTO,
-                        "tooltip": "Auto：连了图片就走 edit，没连图片就走 t2i，节点自己按这个选权重。"
-                                   "t2i：把简短描述扩写成成片画面的长提示词（只要文字）。"
-                                   "edit：把改图指令加上参考图写成精确指令。"
-                                   "两个任务用的是不同权重和不同系统提示词，不能互换。",
+                        "tooltip": "Auto=连图走 edit、不连图走 t2i。两个任务权重不同，不能互换。",
                     },
                 ),
                 "Seed": ("INT", {"default": 42, "min": -1, "max": 0xFFFFFFFF, "step": 1}),
@@ -1310,10 +1296,7 @@ class QwenImage21PromptEnhancer:
                     "BOOLEAN",
                     {
                         "default": True,
-                        "tooltip": "相同的请求 + 相同的种子会直接复用上次结果，跳过这次生成。"
-                                   "注意 ComfyUI 自己也会缓存节点结果：输入没变时整张图都直接复用，"
-                                   "这时要把 Seed 设成 -1 才会重算（-1 会绕过 ComfyUI 的缓存）。"
-                                   "缓存目录：ComfyUI/user/qwen_image21_pe_cache。",
+                        "tooltip": "相同请求+种子直接复用上次结果。想每次重算把 Seed 设 -1。",
                     },
                 ),
                 "Target Megapixels": (
@@ -1323,17 +1306,14 @@ class QwenImage21PromptEnhancer:
                         "min": 0.1,
                         "max": 16.0,
                         "step": 0.1,
-                        "tooltip": "Width/Height 两路输出按这个像素总量换算。"
-                                   "t2i 用模型选的画幅比例；edit 直接沿用参考图的尺寸，不受这里影响。",
+                        "tooltip": "Width/Height 按这个像素总量算（edit 沿用参考图尺寸）。",
                     },
                 ),
                 "Aspect Ratio": (
                     ASPECT_OPTIONS,
                     {
                         "default": ASPECT_AUTO,
-                        "tooltip": "默认让模型自己定画幅（官方行为）。想固定就选一个："
-                                   "节点会把这个画幅同时写进请求交给模型，并让 Width/Height 按它计算，"
-                                   "这样提示词描述的构图和实际画布是一致的。",
+                        "tooltip": "默认模型自己定；选了就固定画幅，并按它算 Width/Height。",
                     },
                 ),
                 "Prompt Count": (
@@ -1343,11 +1323,7 @@ class QwenImage21PromptEnhancer:
                         "min": 1,
                         "max": 8,
                         "step": 1,
-                        "tooltip": "输出几条提示词（列表形式，下游会按条数各跑一次）。"
-                                   "官方契约要求一次回答只给一条，所以每条都是一次完整生成，"
-                                   "耗时基本线性叠加：关掉思考时 t2i 每条约 7 秒、edit 约 8.5 秒"
-                                   "（打开 Think 则是 19 秒 / 52 秒）。"
-                                   "同批各条用 Seed、Seed+1、Seed+2…，模型全程只载入一次。",
+                        "tooltip": "输出几条提示词。每条都是一次完整生成，耗时按条数叠加。",
                     },
                 ),
             },
@@ -1355,15 +1331,13 @@ class QwenImage21PromptEnhancer:
                 "pe_model": (
                     PE_MODEL_TYPE,
                     {
-                        "tooltip": "连接 Qwen Image 2.1 PE Loader：用哪个权重、上下文、"
-                                   "卸载策略和 clip 都由那个节点决定。",
+                        "tooltip": "接 Qwen Image 2.1 PE Loader。",
                     },
                 ),
                 "pe_settings": (
                     PE_SETTINGS_TYPE,
                     {
-                        "tooltip": "可选。连接 Qwen Image 2.1 PE Settings 才使用里面的采样参数；"
-                                   "不连则用官方出厂设置。",
+                        "tooltip": "可选。不接就用官方出厂采样参数。",
                     },
                 ),
                 **{f"Image {index}": ("IMAGE",) for index in range(1, MAX_INPUT_IMAGES + 1)},
