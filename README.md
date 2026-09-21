@@ -38,9 +38,14 @@ GGUF 走 llama.cpp，实测比 int8 safetensors 快约 5 倍，16GB 显存建议
 
 ## 范例工作流
 
-`example_workflows/Qwen-Image-2.1-TI2I.json` 是一份可直接拖进 ComfyUI 的完整文生图 / 改图工作流，
-里面已经接好 PE 加载节点与提示词增强节点（多张参考图 → 角色卡改写）。它还用到了这些第三方节点包，
-没装的节点会显示成红色：ComfyUI-LayerStyle、rgthree-comfy、ComfyUI-Crystools、ComfyUI-Easy-Use。
+`example_workflows/` 里放了三份可直接拖进 ComfyUI 的完整工作流，本包的节点都已经接好在里面。
+第三方节点没装的话会显示成红色，按第三列补齐即可：
+
+| 范例 | 内容 | 除本包外还需要 |
+| --- | --- | --- |
+| `Qwen-Image-2.1-TI2I.json` | Qwen Image 2.1 文生图 / 改图：PE 加载 + 提示词增强 + 多张参考图 | ComfyUI_LayerStyle、rgthree-comfy、ComfyUI-Crystools、ComfyUI-Easy-Use、KayTool |
+| `MiniMax-H3-multi-reference.json` | H3 多参考视频：音频精修、冻结缓存、RTX 超分 | ComfyUI-H3-Multishot、ComfyUI-H3-AudioRefine、comfyui-minimax-h3-audio-T8、ComfyUI-KJNodes、ComfyUI-VideoHelperSuite、ComfyUI-DLSS5-Enhancer、Nvidia_RTX_Nodes_ComfyUI、ComfyUI-SolAttn_triton、ComfyUI-Easy-Use、KayTool |
+| `MiniMax-H3-two-pass-multi-reference.json` | H3 二采多参考：Turbo 采样 + 潜空间放大 | ComfyUI-H3-Multishot、ComfyUI-MiniMax-H3-Turbo、Comfyui_Minimax_h3_latent_Upscaler、ComfyUI-KJNodes、ComfyUI-VideoHelperSuite、ComfyUI-SolAttn_triton、rgthree-comfy、ComfyUI-Easy-Use、KayTool |
 
 ## 中文说明
 
@@ -446,10 +451,15 @@ are picked up too.
 
 ### Example workflow
 
-`example_workflows/Qwen-Image-2.1-TI2I.json` is a complete text-to-image / edit workflow, already wired
-to the PE loaders and the prompt enhancer (several reference images feeding a character-card rewrite).
-It also uses these third-party packs, so their nodes show up red until you install them:
-ComfyUI-LayerStyle, rgthree-comfy, ComfyUI-Crystools and ComfyUI-Easy-Use.
+`example_workflows/` ships three complete workflows you can drag straight into ComfyUI, with this
+pack's nodes already wired in. Nodes from third-party packs show up red until you install them --
+the third column lists what each one needs beyond this pack:
+
+| Example | What it does | Also needs |
+| --- | --- | --- |
+| `Qwen-Image-2.1-TI2I.json` | Qwen Image 2.1 text-to-image / edit: PE loader, prompt enhancer, several reference images | ComfyUI_LayerStyle, rgthree-comfy, ComfyUI-Crystools, ComfyUI-Easy-Use, KayTool |
+| `MiniMax-H3-multi-reference.json` | H3 multi-reference video: audio refine, frozen cache, RTX upscaling | ComfyUI-H3-Multishot, ComfyUI-H3-AudioRefine, comfyui-minimax-h3-audio-T8, ComfyUI-KJNodes, ComfyUI-VideoHelperSuite, ComfyUI-DLSS5-Enhancer, Nvidia_RTX_Nodes_ComfyUI, ComfyUI-SolAttn_triton, ComfyUI-Easy-Use, KayTool |
+| `MiniMax-H3-two-pass-multi-reference.json` | H3 two-pass multi-reference: turbo sampling plus latent upscaling | ComfyUI-H3-Multishot, ComfyUI-MiniMax-H3-Turbo, Comfyui_Minimax_h3_latent_Upscaler, ComfyUI-KJNodes, ComfyUI-VideoHelperSuite, ComfyUI-SolAttn_triton, rgthree-comfy, ComfyUI-Easy-Use, KayTool |
 
 For online mode, the endpoint must support OpenAI multimodal messages. API keys are used only at
 runtime and are never written to disk.
