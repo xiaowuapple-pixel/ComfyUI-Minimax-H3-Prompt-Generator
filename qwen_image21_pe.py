@@ -817,6 +817,19 @@ class QwenImage21PromptEnhancer:
                                    "这样提示词描述的构图和实际画布是一致的。",
                     },
                 ),
+                "Prompt Count": (
+                    "INT",
+                    {
+                        "default": 1,
+                        "min": 1,
+                        "max": 8,
+                        "step": 1,
+                        "tooltip": "输出几条提示词（列表形式，下游会按条数各跑一次）。"
+                                   "官方契约要求一次回答只给一条，所以每条都是一次完整生成，"
+                                   "耗时基本线性叠加：t2i 每条约 20 秒，edit 约 45 秒。"
+                                   "同批各条用 Seed、Seed+1、Seed+2…，模型的载入只做一次。",
+                    },
+                ),
             },
             "optional": {
                 "pe_model": (
@@ -839,11 +852,27 @@ class QwenImage21PromptEnhancer:
 
     RETURN_TYPES = ("STRING", "STRING", "STRING", "BOOLEAN", "INT", "INT")
     RETURN_NAMES = ("Positive Prompt", "WH Ratio", "Ratio Follow", "Parse OK", "Width", "Height")
+    # Every per-prompt value is a list, so a Prompt Count above 1 feeds the graph
+    # N times (ComfyUI runs a downstream node once per element) and the width and
+    # height stay matched to their prompt. With the default count of 1 the lists
+    # hold a single item, which behaves exactly like a scalar.
+    OUTPUT_IS_LIST = (True, True, True, True, True, True)
     FUNCTION = "enhance"
     CATEGORY = "MiniMax H3/Prompt"
     DESCRIPTION = "Official Qwen-Image-2.1 prompt enhancer (PE-T2I / PE-I2I). Connect a PE loader for the weights."
 
     def enhance(self, **inputs):
+        count = max(1, int(inputs.get("Prompt Count", 1) or 1))
+        seed = int(inputs.get("Seed", 42))
+        if seed < 0:
+            seed = random.SystemRandom().randint(0, 0xFFFFFFFF)
+        rows = [
+            self._enhance_one(index, (seed + index) & 0xFFFFFFFF, index == count - 1, **inputs)
+            for index in range(count)
+        ]
+        return tuple([row[column] for row in rows] for column in range(6))
+
+    def _enhance_one(self, variant, seed, is_last, **inputs):
         model = inputs.get("pe_model")
         if not model:
             raise ValueError(
@@ -870,10 +899,6 @@ class QwenImage21PromptEnhancer:
             # The official tooling treats this as an error rather than a warning:
             # dropping the images would look like a successful run of the wrong task.
             raise ValueError("t2i 任务不接受输入图片。要带图改写真，请把 Task 换成 Image Edit。")
-
-        seed = int(inputs.get("Seed", 42))
-        if seed < 0:
-            seed = random.SystemRandom().randint(0, 0xFFFFFFFF)
 
         if settings.get("preset", SAMPLING_PRESET_DEFAULT) == SAMPLING_PRESET_DEFAULT:
             temperature = profile["temperature"]
@@ -970,10 +995,11 @@ class QwenImage21PromptEnhancer:
                     "没有可用的文本编码器。请把官方 PE 权重放进 models/text_encoders，"
                     "或改用 Qwen Image 2.1 PE Loader (GGUF)。"
                 )
-            print(
-                f"[Qwen Image 2.1 PE] 载入 {task} 编码器：{encoder}"
-                "（两个 PE 编码器各 8.8GB，本节点全程只驻留其中一个）"
-            )
+            if variant == 0:
+                print(
+                    f"[Qwen Image 2.1 PE] 载入 {task} 编码器：{encoder}"
+                    "（两个 PE 编码器各 8.8GB，本节点全程只驻留其中一个）"
+                )
             clip = _load_encoder(encoder)
             try:
                 raw = _run_native_clip(
@@ -993,7 +1019,8 @@ class QwenImage21PromptEnhancer:
                     },
                 )
             finally:
-                if source == SOURCE_AUTO and bool(model.get("unload", True)):
+                # A multi-prompt batch keeps the model until the last variant.
+                if is_last and bool(model.get("unload", True)):
                     _release_encoder()
             thinking, answer = _split_thinking(raw)
             parsed = _parse_answer(answer, task)
@@ -1041,7 +1068,7 @@ class QwenImage21PromptEnhancer:
                 **sampling,
             )
         finally:
-            if bool(inputs.get("Unload Model After Generation", True)):
+            if is_last and bool(model.get("unload", True)):
                 _VisionRuntime.close()
 
         thinking, answer = _split_thinking(raw)

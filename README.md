@@ -78,7 +78,7 @@ GPU 卸载层数默认为 `-1`，表示全部放入显存；显存不足时可�
 | **Qwen Image 2.1 PE Loader (safetensors)** | 官方 PE 权重（推荐）：`T2I Encoder` / `I2I Encoder` 两个选择，从 `text_encoders` 里读 |
 | **Qwen Image 2.1 PE Loader (GGUF)** | PE 的 GGUF 量化版：`T2I GGUF` + `I2I GGUF` + `Vision Model`(mmproj) + `GPU Offload Layers`。实测比原生 int8 快约 5 倍 |
 | **Qwen Image 2.1 PE Settings**（可选） | 采样参数：预设、temperature、top_p、top_k、presence_penalty、max_new_tokens。接到主节点的 `pe_settings`；**不接就用官方出厂值** |
-| **Qwen Image 2.1 Prompt Enhancer** | 只有每次运行才会变的东西：提示词、任务、种子、画幅、目标像素、缓存开关，以及 1-10 张参考图 |
+| **Qwen Image 2.1 Prompt Enhancer** | 只有每次运行才会变的东西：提示词、任务、种子、画幅、目标像素、缓存开关、输出条数，以及 1-10 张参考图 |
 
 两个加载节点输出同一种 `PE Model`，**用哪个就接哪个**——这样每个模式只显示它需要的选择，
 不会出现"选了 A 还要面对 B 的空白控件"：
@@ -115,6 +115,15 @@ GPU 卸载层数默认为 `-1`，表示全部放入显存；显存不足时可�
 想固定就选一个比例，节点会做两件事：把这个画幅写进交给模型的请求（中英双语标注，
 避免 edit 任务的输出语言被带偏），并让 `Width` / `Height` 按它计算。这样提示词描述的构图和实际画布是一致的。
 如果模型的判断和你的设定不同，日志里会提示一句。
+
+`Prompt Count` 决定一次输出几条提示词。六路输出都是**列表**（长度等于条数），
+下游节点会按条数各跑一次——比如接一个 KSampler 就是一轮出 N 张。
+
+- 同批各条用 `Seed`、`Seed+1`、`Seed+2`…，所以固定 Seed 能复现整批
+- **耗时基本线性叠加**：官方契约一次回答只给一条，每条都得完整生成一遍。
+  16GB 卡 + GGUF 实测：t2i 每条约 20-35 秒，edit 约 45-50 秒
+- 唯一省下的是模型载入：整批只载入一次、只释放一次（省十几秒，不是每条都省）
+- 配合缓存：同一批重复执行是毫秒级
 
 官方 PE 编码器（放到 `models/text_encoders/`）：
 
@@ -216,7 +225,7 @@ This is four nodes now, each owning one concern:
 | **Qwen Image 2.1 PE Loader (safetensors)** | The official PE weights (recommended): two pickers, `T2I Encoder` / `I2I Encoder`, read from `text_encoders` |
 | **Qwen Image 2.1 PE Loader (GGUF)** | The PE GGUF quants: `T2I GGUF` + `I2I GGUF` + `Vision Model` (mmproj) + `GPU Offload Layers`. Measured about 5x faster than the native int8 path |
 | **Qwen Image 2.1 PE Settings** (optional) | Sampling: preset, temperature, top_p, top_k, presence_penalty, max_new_tokens. Wire it into `pe_settings`; **leave it off to use the official settings** |
-| **Qwen Image 2.1 Prompt Enhancer** | Only what changes per run: prompt, task, seed, aspect ratio, target megapixels, cache toggle, and 1-10 reference images |
+| **Qwen Image 2.1 Prompt Enhancer** | Only what changes per run: prompt, task, seed, aspect ratio, target megapixels, cache toggle, prompt count, and 1-10 reference images |
 
 Both loaders output the same `PE Model` type, so you wire whichever one matches your case -- and each shows
 only the pickers it needs:
@@ -254,6 +263,15 @@ Where the outputs go:
 Pick a ratio to fix it and the node does two things: it tells the model about it (bilingual marker, so an edit run's
 output language is not dragged along) and it makes `Width` / `Height` follow it. The description and the frame then
 agree, and the log notes it when the model's own choice differed.
+
+`Prompt Count` sets how many prompts a run returns. All six outputs are **lists** (length = count), so downstream
+nodes run once per prompt -- one KSampler wired to it renders N images.
+
+- Variants use `Seed`, `Seed+1`, `Seed+2`, ... so a fixed seed reproduces the whole batch
+- **Cost is essentially linear**: the official contract allows one answer per response, so every prompt is a full
+  generation. Measured on a 16 GB card with GGUF: about 20-35 s per t2i prompt, 45-50 s per edit prompt
+- The only saving is the model load: one load and one release for the whole batch (tens of seconds, not per prompt)
+- With the cache on, re-running the same batch costs milliseconds
 
 Official PE encoders (put them in `models/text_encoders/`):
 
