@@ -18,8 +18,11 @@ from __future__ import annotations
 
 import json
 import inspect
+import hashlib
 import os
 import random
+
+import numpy as np
 
 from .nodes import (
     CONTEXT_LENGTH_OPTIONS,
@@ -292,6 +295,66 @@ def _run_native_clip(clip, prompt, images, profile, system_prompt, sampling):
     return clip.decode(generated)
 
 
+def _cache_dir():
+    import folder_paths
+
+    path = os.path.join(folder_paths.get_user_directory(), "qwen_image21_pe_cache")
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def _cache_key(task, prompt, images, system_prompt, sampling):
+    """Identity of one expansion: same inputs must give the same answer.
+
+    A prompt expansion is a pure function of its inputs, and re-running the same
+    request while iterating on the image side is the common case, so the second
+    run should not cost another two minutes.
+    """
+    digest = hashlib.sha256()
+    digest.update(task.encode("utf-8"))
+    digest.update(prompt.encode("utf-8"))
+    digest.update(system_prompt.encode("utf-8"))
+    digest.update(json.dumps(sampling, sort_keys=True, default=str).encode("utf-8"))
+    for image in images:
+        if hasattr(image, "detach"):
+            array = image.detach().cpu().numpy()
+        else:
+            array = np.asarray(image)
+        array = np.clip(array * 255.0, 0, 255).astype("uint8")
+        digest.update(str(array.shape).encode("ascii"))
+        digest.update(array.tobytes())
+    return digest.hexdigest()[:32]
+
+
+def _cache_read(key):
+    path = os.path.join(_cache_dir(), key + ".json")
+    try:
+        with open(path, encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict) or "positive_prompt" not in data:
+        return None
+    return data
+
+
+def _cache_write(key, task, prompt, result):
+    record = {
+        "task": task,
+        "request": prompt[:200],
+        "positive_prompt": result[0],
+        "wh_ratio": result[1],
+        "ratio_follow": result[2],
+        "parse_ok": result[3],
+    }
+    path = os.path.join(_cache_dir(), key + ".json")
+    try:
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(record, handle, ensure_ascii=False, indent=2)
+    except OSError as exc:
+        print(f"[Qwen Image 2.1 PE] 缓存写入失败（不影响本次结果）：{exc}")
+
+
 class QwenImage21PromptEnhancer:
     """Expand a short request into a Qwen-Image-2.1 prompt with the official PE models."""
 
@@ -376,6 +439,15 @@ class QwenImage21PromptEnhancer:
                     },
                 ),
                 "Unload Model After Generation": ("BOOLEAN", {"default": True}),
+                "Use Cache": (
+                    "BOOLEAN",
+                    {
+                        "default": True,
+                        "tooltip": "相同的请求 + 相同的种子会直接复用上次结果，跳过这次生成。"
+                                   "一次扩写要一两分钟，反复调图时这个开关能省掉绝大部分等待。"
+                                   "缓存目录：ComfyUI/user/qwen_image21_pe_cache。",
+                    },
+                ),
             },
             "optional": {
                 **{f"Image {index}": ("IMAGE",) for index in range(1, MAX_INPUT_IMAGES + 1)},
@@ -432,6 +504,54 @@ class QwenImage21PromptEnhancer:
         context_length = int(inputs.get("Context Length", DEFAULT_CONTEXT_LENGTH) or DEFAULT_CONTEXT_LENGTH)
         requested = int(inputs.get("Max New Tokens", 0) or 0) or profile["max_new_tokens"]
         system_prompt = _load_system_prompt(task, inputs.get("System Prompt File", ""))
+        source = inputs.get("Model Source", SOURCE_GGUF)
+        if source == SOURCE_CLIP:
+            # ComfyUI grows the KV cache with the request, so there is no fixed
+            # window to trim against here.
+            max_tokens = requested
+        else:
+            max_tokens = _completion_budget(context_length, requested)
+            if max_tokens < requested:
+                print(
+                    f"[Qwen Image 2.1 PE] 上下文 {context_length} 放不下官方 {requested} 个新 token，"
+                    f"本次上限收敛为 {max_tokens}。需要更长输出请调大 Context Length。"
+                )
+
+        cache_key = None
+        if bool(inputs.get("Use Cache", True)):
+            model_hint = {
+                SOURCE_GGUF: inputs.get("Language Model", ""),
+                SOURCE_ONLINE: inputs.get("Online Model", ""),
+            }.get(source, "clip")
+            cache_key = _cache_key(
+                task,
+                prompt,
+                images,
+                system_prompt,
+                {
+                    "source": source,
+                    "model": model_hint,
+                    "max_tokens": max_tokens,
+                    "temperature": temperature,
+                    "top_p": top_p,
+                    "top_k": top_k,
+                    "presence_penalty": presence_penalty,
+                    "seed": seed,
+                },
+            )
+            cached = _cache_read(cache_key)
+            if cached is not None:
+                print(
+                    "[Qwen Image 2.1 PE] 命中缓存（相同请求 + 相同种子），跳过生成。"
+                    "需要重新生成请关掉 Use Cache 或清空 user/qwen_image21_pe_cache。"
+                )
+                return (
+                    cached.get("positive_prompt", ""),
+                    cached.get("wh_ratio", ""),
+                    cached.get("ratio_follow", ""),
+                    bool(cached.get("parse_ok", False)),
+                )
+
         content = []
         for image in images:
             content.append(
@@ -446,18 +566,6 @@ class QwenImage21PromptEnhancer:
             {"role": "user", "content": content},
         ]
 
-        source = inputs.get("Model Source", SOURCE_GGUF)
-        if source == SOURCE_CLIP:
-            # ComfyUI grows the KV cache with the request, so there is no fixed
-            # window to trim against here.
-            max_tokens = requested
-        else:
-            max_tokens = _completion_budget(context_length, requested)
-            if max_tokens < requested:
-                print(
-                    f"[Qwen Image 2.1 PE] 上下文 {context_length} 放不下官方 {requested} 个新 token，"
-                    f"本次上限收敛为 {max_tokens}。需要更长输出请调大 Context Length。"
-                )
         if source == SOURCE_CLIP:
             clip = inputs.get("clip")
             if clip is None:
@@ -484,12 +592,7 @@ class QwenImage21PromptEnhancer:
             thinking, answer = _split_thinking(raw)
             parsed = _parse_answer(answer, task)
             self._report(parsed)
-            return (
-                parsed["positive_prompt"],
-                parsed["wh_ratio"],
-                parsed["ratio_follow"],
-                parsed["parse_ok"],
-            )
+            return self._store(parsed, cache_key, task, prompt)
 
         online = source == SOURCE_ONLINE
         if online:
@@ -544,12 +647,19 @@ class QwenImage21PromptEnhancer:
         thinking, answer = _split_thinking(raw)
         parsed = _parse_answer(answer, task)
         self._report(parsed)
-        return (
+        return self._store(parsed, cache_key, task, prompt)
+
+    @staticmethod
+    def _store(parsed, cache_key, task, prompt):
+        result = (
             parsed["positive_prompt"],
             parsed["wh_ratio"],
             parsed["ratio_follow"],
             parsed["parse_ok"],
         )
+        if cache_key:
+            _cache_write(cache_key, task, prompt, result)
+        return result
 
     @staticmethod
     def _report(parsed):

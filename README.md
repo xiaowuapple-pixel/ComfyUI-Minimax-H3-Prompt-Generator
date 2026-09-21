@@ -85,6 +85,22 @@ GPU 卸载层数默认为 `-1`，表示全部放入显存；显存不足时可�
 来源：[Comfy-Org/Qwen-Image-2.1](https://huggingface.co/Comfy-Org/Qwen-Image-2.1)。每个 8.82 GB，16GB 显卡可以跑。
 实测 4080 上约 10 token/s，一次 t2i 扩写（含思考块）约 2 分钟。
 
+### 关于速度
+
+这两个 PE 模型是 9B 且**必须带思考块**，思考内容大约占输出的一半，所以单次扩写本身就是一两分钟的量级。
+另外这两个 checkpoint **没有 MTP 头**，所以投机解码也用不上（节点里的"auto"会退化成普通采样）。
+
+能用的加速手段，按效果排序：
+
+1. **换 GGUF 路线**（效果最明显）。同机实测：ComfyUI 原生 int8_convrot 约 14 token/s，
+   而 llama.cpp 跑同级别 9B GGUF 约 39 token/s。把 `Local GGUF` 指向 PE 的 GGUF 量化版，
+   单次扩写大概能压到 40-60 秒。见上面 GGUF 表格。
+2. **开 `Use Cache`（默认开启）**。相同请求 + 相同种子会直接复用上次结果，第二次起是毫秒级。
+   反复调图时这个开关能省掉绝大部分等待。缓存放在 `ComfyUI/user/qwen_image21_pe_cache/`，
+   要强制重新生成就关掉它或清空这个目录。
+3. **用在线接口**。把 PE 模型部署到更大的显卡上（官方 `serve.sh` + vLLM），
+   本节点用 `Online LLM` 调用，通常 20-40 秒。
+
 建议的本地模型（适配 16GB 显存，来源见下方链接）：
 
 | 用途 | 文件 | 大小 |
@@ -167,6 +183,23 @@ Official PE encoders (put them in `models/text_encoders/`):
 
 From [Comfy-Org/Qwen-Image-2.1](https://huggingface.co/Comfy-Org/Qwen-Image-2.1). Each is 8.82 GB and fits a 16 GB card.
 Measured on a 4080: about 10 tokens/s, so one t2i expansion including its thinking block takes roughly two minutes.
+
+### About speed
+
+These PE models are 9B and **must** emit a thinking block, which is about half of the output, so one expansion
+is inherently a one-to-two minute job. Neither checkpoint ships an MTP head either, so speculative decoding is
+not available (the node's "auto" quietly falls back to plain sampling).
+
+What actually helps, best first:
+
+1. **Use the GGUF path.** Measured on the same machine: ComfyUI's native int8_convrot runs at about 14 tokens/s,
+   while llama.cpp runs a comparable 9B GGUF at about 39 tokens/s. Point `Local GGUF` at a PE GGUF quant and one
+   expansion should drop to roughly 40-60 seconds.
+2. **Keep `Use Cache` on (default).** Same request plus same seed reuses the previous result, so repeat runs are
+   instant. The cache lives in `ComfyUI/user/qwen_image21_pe_cache/`; disable it or clear that folder to force a
+   fresh generation.
+3. **Use a hosted endpoint.** Serve the PE model with the official `serve.sh` + vLLM on a bigger GPU and call it
+   through `Online LLM`; typically 20-40 seconds.
 
 Suggested local models for a 16 GB card ([Qwen-Image-2.1-PE-T2I-GGUF](https://huggingface.co/prithivMLmods/Qwen-Image-2.1-PE-T2I-GGUF),
 [Qwen-Image-2.1-PE-I2I-GGUF](https://huggingface.co/prithivMLmods/Qwen-Image-2.1-PE-I2I-GGUF)):
