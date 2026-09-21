@@ -42,6 +42,93 @@ SECTION_NAMES = (
     "non_diegetic_music",
 )
 
+# 正文模式（T2VA / I2VA / FL2VA / L2VA）用官方三段式；全参考模式（Ref2VA）才用上面的六段式。
+# 以前不分模式，正文请求也被写成 Ref2VA 六段结构，等于让模型按错的规范写提示词。
+BASE_SECTION_NAMES = (
+    "integrated_multimodal_description",
+    "overall_soundscape",
+    "non_diegetic_music",
+)
+
+BASE_GENERATION_TYPES = frozenset({
+    "文生视频", "图生视频", "首尾帧生成", "尾帧生成",
+    "Text-to-Video", "Image-to-Video", "First/Last Frame", "Last Frame",
+})
+
+
+def _is_base_generation_type(generation_type):
+    return str(generation_type or "").strip() in BASE_GENERATION_TYPES
+
+
+def _sections_for(generation_type):
+    return BASE_SECTION_NAMES if _is_base_generation_type(generation_type) else SECTION_NAMES
+
+
+def _strip_type_heading(text, generation_type):
+    """删掉模型偶尔写在前面的生成类型标题行（如单独一行 “Text-to-Video”）。"""
+    lines = text.splitlines()
+    while lines:
+        head = lines[0].strip().strip("*_# ")
+        if head and (head == str(generation_type).strip() or head in BASE_GENERATION_TYPES or head in {"Multi-Reference", "自动判别", "Auto Detect"}):
+            lines.pop(0)
+            while lines and not lines[0].strip():
+                lines.pop(0)
+            continue
+        break
+    return "\n".join(lines).strip()
+
+
+#: 官方镜头时间戳写法是 [Shot N] At 00:05.000,（MM:SS.mmm，逗号结尾）。
+#: 模型经常写成 00:1.5 / 1.5s / 5s，这里统一折算，不再指望模型自觉。
+_SHOT_TIME = re.compile(r"\[(Shot\s+\d+)\]\s*(?:At\s*)?(\d{1,2}:\d{1,2}(?:\.\d{1,3})?|\d+(?:\.\d+)?)\s*(?:s|sec|seconds)?\s*([,，]?)", re.IGNORECASE)
+_SHOT_PLAIN = re.compile(r"\[(Shot\s+\d+)\]\s*(?!At\b)(?=[^\]\n]{0,40}?[，,])", re.IGNORECASE)
+
+
+def _stamp(seconds):
+    total_ms = int(round(float(seconds) * 1000))
+    minutes, remainder = divmod(total_ms, 60000)
+    secs, ms = divmod(remainder, 1000)
+    return f"{minutes:02d}:{secs:02d}.{ms:03d}"
+
+
+def _normalize_shot_times(text):
+    def replace(match):
+        shot, value = match.group(1), match.group(2)
+        if ":" in value:
+            minutes, secs = value.split(":", 1)
+            seconds = int(minutes) * 60 + float(secs)
+        else:
+            seconds = float(value)
+        if shot.lower().replace(" ", "") == "shot1":
+            # 官方规范里第一个镜头不写时间戳
+            return f"[{shot}]"
+        return f"[{shot}] At {_stamp(seconds)},"
+
+    return _SHOT_TIME.sub(replace, text)
+
+
+def _body_section(sections):
+    """正文主体字段名：正文模式是 integrated_multimodal_description，全参考是 detailed_description。"""
+    return "integrated_multimodal_description" if tuple(sections) == BASE_SECTION_NAMES else "detailed_description"
+
+
+def _strip_t2va_alignment(text):
+    """文生视频没有首帧/尾帧，模型偶尔会照抄 I2VA 的首行对齐指令，这里删掉。
+
+    只处理第一个字段之前的那段，且必须以 <Picture N> 开头才对；其他情况的正文一律不动。
+    """
+    first_section = re.search(_section_pattern("integrated_multimodal_description"), text)
+    if not first_section:
+        return text
+    head, rest = text[:first_section.start()], text[first_section.start():]
+    if "<Picture" not in head:
+        return text
+    kept = [
+        line for line in head.splitlines()
+        if line.strip() and "<Picture" not in line and "fully referenced" not in line.lower()
+    ]
+    return ("\n".join(kept) + "\n\n" + rest).strip() if kept else rest.strip()
+
 
 SYSTEM_PROMPT = """你是 MiniMax H3 全参考模式（Ref2VA）视频提示词编写专家。依据已经完成的参考图
 视觉分析和用户描述，输出可以直接用于 MiniMax H3 的完整中文视频提示词。以下规则来自官方
@@ -88,6 +175,47 @@ non_diegetic_music:
     小于总时长；每个动作在分配时间内可完成；声音和配乐没有被放错字段。
 15. 禁止用改写近义词的方式反复描述同一外貌、同一动作或同一构图。每个镜头必须推进新的动作状态、
     机位信息或声音事件；已经在 subject_definitions 确立的静态特征，正文只在首次出场时完整描述。
+"""
+
+
+BASE_SYSTEM_PROMPT = """你是 MiniMax H3 视频提示词编写专家。依据已经完成的画面分析和用户描述，
+输出可以直接用于 MiniMax H3 的完整提示词。以下规则来自官方 MiniMax H3 h3-prompt-writing Skill
+的正文模式（T2VA / I2VA / FL2VA / L2VA）规范，不得压缩为故事梗概。
+
+只输出提示词正文，不要解释、分析过程、Markdown 标题或代码块。必须严格按以下字段及顺序输出：
+integrated_multimodal_description:
+overall_soundscape:
+non_diegetic_music:
+
+不要输出生成类型名称充当标题（例如单独一行 “Text-to-Video”）；除首行对齐指令外，
+integrated_multimodal_description 之前不允许有任何行。
+
+除上述官方字段名和下面规定的格式标记外，描述语言由节点的“输出中文提示词”开关决定。
+
+规则：
+1. 首行按生成类型写对齐指令，首行之后空一行再写字段。图生视频（I2VA）首行固定为
+   `For the target video, at 0.00 seconds into the target video, <Picture 1> (from [Shot 1]) is fully referenced.`；
+   首尾帧（FL2VA）首行说明 <Picture 1> 对齐 0.00 秒、<Picture 2> 对齐本段结束时刻，并给出两帧之间的连续路径；
+   尾帧（L2VA）首行说明 <Picture 1> 对齐本段结束时刻。
+   纯文生视频（T2VA）**不要写任何首行对齐指令**，也不要以“文生视频”“Text-to-Video”这类类型名开头，
+   直接从 integrated_multimodal_description 字段写起。
+2. integrated_multimodal_description 是正文主体：先用一两句定下整体视觉风格与画幅，再按播放顺序写镜头。
+   [Shot 1] 不写时间戳；后续每一个切镜都必须写成 `[Shot N] At 00:05.000,` 这种格式（MM:SS.mmm，
+   两位分钟、两位秒、三位毫秒，逗号结尾），时间严格递增且小于总时长。
+   禁止写成 `[Shot 2] At 1.5s - 4.5s,` 这类区间或 `[Shot 2] At 5s,` 这类简写。
+3. 每个镜头交代构图、主体外貌与位置、场景与关键道具、动作与反应、景别、机位、运镜和同步的画内声音；
+   运镜幅度只用小幅、中幅、大幅，速度只用慢速、中速、快速。
+4. 动作量必须适配总时长；短视频可以只有一个镜头。不要为凑长度重复描述、堆砌近义词或强行加镜头。
+5. 有真实对白或歌唱时，按首次发声顺序分配稳定的 (S1)、(S2) 编号，并使用
+   <d>[Chinese]对白原文</d>（语言标签按实际语种）。用户输入引号或 <d> 内的对白必须逐字完整复制，
+   禁止省略号、概括、改写或截断；用户没有要求对白时不要擅自添加。
+6. 画面中可见的文字（招牌、字幕、屏幕文字）用引号原样写出并保持原语言。
+7. overall_soundscape 只总结持续环境声与关键画内音效，不重复对白；non_diegetic_music
+   描述观众才能听见的配乐（乐器、速度、动态），不需要配乐时写 N/A。
+8. 参考图只按它在本类型里的用途使用（身份/风格参考、首帧、尾帧或关键帧），不要凭空把它解释成别的角色或场景。
+9. 不虚构素材无法支持的身份、品牌或外貌；用户描述含糊时补全为连贯、可拍摄、符合指定时长与画幅的方案。
+10. 最后自查：三个字段齐全且有内容；镜头时间严格递增且小于总时长；每次切镜都有明确分工；
+    声音与配乐没有写错字段。
 """
 
 
@@ -159,9 +287,77 @@ OFFICIAL_SKILL_PATHS = {
     "纸张拼贴科普": "paper-collage-explainer-generator",
     "纸艺定格科普": "papercraft-stop-motion-explainer",
 }
+# 节点面板和外部调用方用的是英文标签（INPUT_TYPES 里列的就是这几个），
+# 以前只认中文键，于是按英文标签传进来时匹配不到技能文件、直接退回内置一行提示词。
+OFFICIAL_SKILL_PATHS.update({
+    "General H3 Prompt": "h3-prompt-writing",
+    "3D Animated Short": "3d-animation-short-generator",
+    "Brand Promo": "brand-promo-video-generator",
+    "Co-op Game Intro": "co-op-game-intro-generator",
+    "Hand-drawn Live Action": "handdrawn-live-video-generator",
+    "Minimalist Product Ad": "minimalist-product-ad-generator",
+    "Music Subtitle Video": "music-video-subtitle-generator",
+    "Paper Collage Explainer": "paper-collage-explainer-generator",
+    "Papercraft Stop-motion Explainer": "papercraft-stop-motion-explainer",
+})
 
 
-def _official_skill_instruction(skill_name):
+# skills/<技能>/references/ 下的官方规范原文：正文模式看 base-en，全参考模式看 ref-en。
+# SKILL.md 里写着「read references/base-en.txt and follow its final prompt structure」，
+# 但模型没有读文件的能力 —— 不把原文喂进去，它只能自己编结构（正文请求被写成 Ref2VA
+# 六段式就是这么来的）。这里按模式把对应那份原文一起送进去。
+_SKILL_GUIDES = {"base": "base-en.txt", "reference": "ref-en.txt"}
+
+#: 注入上限（字符）。节点上下文默认 12288 token，技能文件 + 规范原文 + 分析 + 输出
+#: 必须一起放得下，所以两个都限长（超出部分截断，并附一句说明）。
+_SKILL_GUIDE_LIMIT = 8000
+_SKILL_MD_LIMIT = 8000
+_SKILL_REFERENCE_MENTION = re.compile(r"references/([A-Za-z0-9._\-]+)")
+
+
+def _clip(text, limit, note):
+    if len(text) <= limit:
+        return text
+    return text[:limit].rstrip() + f"\n\n（{note}）"
+
+
+def _skill_reference_text(folder, skill_text, generation_type):
+    """把 SKILL.md 点名要求读的 references 原文一并送给模型。
+
+    h3-prompt-writing 按模式挑一份（正文 base-en / 全参考 ref-en）；其它技能按 SKILL.md
+    里提到的顺序把 references 文件依次带上，总额受 _SKILL_GUIDE_LIMIT 限制。
+    """
+    root = Path(__file__).parent / "skills" / folder / "references"
+    if folder == "h3-prompt-writing":
+        names = [_SKILL_GUIDES["base" if _is_base_generation_type(generation_type) else "reference"]]
+        limit = _SKILL_GUIDE_LIMIT
+    else:
+        names = []
+        limit = 6000
+        for name in _SKILL_REFERENCE_MENTION.findall(skill_text or ""):
+            if name not in names:
+                names.append(name)
+    parts = []
+    used = 0
+    for name in names:
+        try:
+            guide = (root / name).read_text(encoding="utf-8").strip()
+        except OSError:
+            continue
+        if not guide:
+            continue
+        remaining = limit - used
+        if remaining <= 400:
+            break
+        if len(guide) > remaining:
+            guide = _clip(guide, remaining, f"references/{name} 过长，其余部分已省略")
+        header = f"以下是官方规范原文 references/{name}，最终提示词必须严格按它的字段名、字段顺序和格式输出：\n\n"
+        parts.append(header + guide)
+        used += len(header) + len(guide)
+    return "\n\n".join(parts)
+
+
+def _official_skill_instruction(skill_name, generation_type=None):
     """Read the vendored MiniMax-H3 skill snapshot; never fetch at runtime."""
     folder = OFFICIAL_SKILL_PATHS.get(skill_name)
     if not folder:
@@ -170,7 +366,13 @@ def _official_skill_instruction(skill_name):
     try:
         text = skill_file.read_text(encoding="utf-8").strip()
         if text:
-            return "以下是本地安装的 MiniMax-H3 官方技能文件内容，请严格按其要求执行：\n\n" + text
+            # 扫描 references 提及要用完整原文（截断后可能正好把提及部分切掉）
+            reference = _skill_reference_text(folder, text, generation_type)
+            clipped = _clip(text, _SKILL_MD_LIMIT, "技能文件较长，其余部分已省略")
+            instruction = "以下是本地安装的 MiniMax-H3 官方技能文件内容，请严格按其要求执行：\n\n" + clipped
+            if reference:
+                instruction += "\n\n" + reference
+            return instruction
     except OSError:
         pass
     return CREATIVE_SKILL_INSTRUCTIONS.get(skill_name, CREATIVE_SKILL_INSTRUCTIONS["自动判别"])
@@ -416,7 +618,11 @@ class _OnlineRuntime:
     def create_chat_completion(self, messages, stream=True, **parameters):
         payload = {"model": self.model, "messages": messages, "stream": bool(stream)}
         payload.update({k: v for k, v in parameters.items() if k in {
-            "temperature", "top_p", "max_tokens", "frequency_penalty", "presence_penalty", "seed"
+            "temperature", "top_p", "top_k", "min_p", "max_tokens",
+            "frequency_penalty", "presence_penalty", "seed",
+            # vLLM/SGLang extension used by the Qwen-Image-2.1 prompt enhancers
+            # to keep the thinking block on. Other nodes never pass it.
+            "chat_template_kwargs",
         }})
         request = urllib.request.Request(self.base_url + "/chat/completions", data=json.dumps(payload).encode("utf-8"), headers={
             "Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json",
@@ -493,21 +699,21 @@ def _section_pattern(section):
     return rf"(?im:^\s*(?:[#>*-]+\s*)?(?:\*\*|__)?{re.escape(section)}(?:\*\*|__)?\s*[:\uFF1A](?:\*\*|__)?)"
 
 
-def _normalize_sections(text):
+def _normalize_sections(text, sections=SECTION_NAMES):
     normalized = text
-    for section in SECTION_NAMES:
+    for section in sections:
         normalized = re.sub(_section_pattern(section), f"{section}:", normalized, count=1)
 
-    present = [section for section in SECTION_NAMES if re.search(_section_pattern(section), text)]
-    if present and len(present) < len(SECTION_NAMES):
-        for section in SECTION_NAMES:
+    present = [section for section in sections if re.search(_section_pattern(section), text)]
+    if present and len(present) < len(sections):
+        for section in sections:
             if section not in present:
                 normalized = normalized.rstrip() + f"\n\n{section}:\nN/A"
     return normalized.strip()
 
 
-def _h3_section_count(text):
-    return sum(bool(re.search(_section_pattern(section), text)) for section in SECTION_NAMES)
+def _h3_section_count(text, sections=SECTION_NAMES):
+    return sum(bool(re.search(_section_pattern(section), text)) for section in sections)
 
 
 def _looks_like_internal_text(text):
@@ -563,37 +769,37 @@ def _stream_completion(llm, messages, stage, **parameters):
     return _clean_output("".join(pieces))
 
 
-def _format_error(text):
+def _format_error(text, sections=SECTION_NAMES):
     positions = []
-    for section in SECTION_NAMES:
+    for section in sections:
         match = re.search(_section_pattern(section), text)
         if match is None:
             return f"缺少字段 {section}"
         positions.append(match.start())
     if positions != sorted(positions):
-        return "六个字段的顺序不正确"
+        return "字段顺序不正确"
     return None
 
 
-def _section_text(text, section):
-    index = SECTION_NAMES.index(section)
-    next_section = SECTION_NAMES[index + 1] if index + 1 < len(SECTION_NAMES) else None
+def _section_text(text, section, sections=SECTION_NAMES):
+    index = sections.index(section)
+    next_section = sections[index + 1] if index + 1 < len(sections) else None
     pattern = r"(?s:" + _section_pattern(section) + r"\s*(.*?))"
     pattern += rf"(?={_section_pattern(next_section)}|\Z)" if next_section else r"\Z"
     match = re.search(pattern, text)
     return match.group(1).strip() if match else ""
 
 
-def _replace_section(text, section, replacement):
-    index = SECTION_NAMES.index(section)
-    next_section = SECTION_NAMES[index + 1] if index + 1 < len(SECTION_NAMES) else None
+def _replace_section(text, section, replacement, sections=SECTION_NAMES):
+    index = sections.index(section)
+    next_section = sections[index + 1] if index + 1 < len(sections) else None
     pattern = r"(?s:" + _section_pattern(section) + r"\s*.*?)"
     pattern += rf"(?={_section_pattern(next_section)}|\Z)" if next_section else r"\Z"
     return re.sub(pattern, f"{section}:\n{replacement.strip()}\n\n", text, count=1).strip()
 
 
-def _detail_is_short(text, duration):
-    details = _section_text(text, "detailed_description")
+def _detail_is_short(text, duration, sections=SECTION_NAMES):
+    details = _section_text(text, _body_section(sections), sections)
     chinese_count = len(re.findall(r"[\u4e00-\u9fff]", details))
     target = max(180, min(700, round(float(duration) * 45)))
     shots = len(re.findall(r"\[Shot\s+\d+\]", details, flags=re.IGNORECASE))
@@ -601,49 +807,54 @@ def _detail_is_short(text, duration):
     return chinese_count < target or shots < minimum_shots
 
 
-def _quality_errors(text, duration):
+def _quality_errors(text, duration, sections=SECTION_NAMES):
     errors = []
-    format_error = _format_error(text)
+    format_error = _format_error(text, sections)
     if format_error:
         return [format_error]
 
-    summary = _section_text(text, "summary")
-    retention = _section_text(text, "retention_analysis")
-    details = _section_text(text, "detailed_description")
-    soundscape = _section_text(text, "overall_soundscape")
+    # 正文模式只有三个字段，没有 summary / retention_analysis / subject_definitions，
+    # 那些检查只在全参考模式下做。
+    reference_mode = tuple(sections) == SECTION_NAMES
+    body_section = _body_section(sections)
+    summary = _section_text(text, "summary", sections) if reference_mode else ""
+    retention = _section_text(text, "retention_analysis", sections) if reference_mode else ""
+    details = _section_text(text, body_section, sections)
+    soundscape = _section_text(text, "overall_soundscape", sections)
 
     chinese_count = len(re.findall(r"[\u4e00-\u9fff]", details))
     minimum_chinese = max(180, min(700, round(float(duration) * 45)))
     if chinese_count < minimum_chinese:
-        errors.append(f"detailed_description 只有约 {chinese_count} 个汉字，至少需要 {minimum_chinese} 个")
+        errors.append(f"{body_section} 只有约 {chinese_count} 个汉字，至少需要 {minimum_chinese} 个")
 
     shot_count = len(re.findall(r"\[Shot\s+\d+\]", details, flags=re.IGNORECASE))
     minimum_shots = 1 if duration <= 6 else 2 if duration <= 15 else 3
     if shot_count < minimum_shots:
         errors.append(f"只有 {shot_count} 个镜头，当前时长至少需要 {minimum_shots} 个有明确分工的镜头")
 
-    if len(re.findall(r"[\u4e00-\u9fff]", summary)) < 60:
-        errors.append("summary 没有完整概述主体关系、动作走向和参考用途")
+    if reference_mode:
+        if len(re.findall(r"[\u4e00-\u9fff]", summary)) < 60:
+            errors.append("summary 没有完整概述主体关系、动作走向和参考用途")
 
-    retention_lines = [line.strip() for line in retention.splitlines() if line.strip()]
-    relationship = (
-        r"(?:fully_preserved|partially_preserved|attribute_transfer|weak_reference|"
-        r"fully_copy|partially_copy|reference)"
-    )
-    weak_retention = []
-    for line in retention_lines:
-        marker = re.search(relationship, line)
-        explanation = line[marker.end():] if marker else ""
-        explanation = re.sub(r"^[\s:：\-—–]+", "", explanation)
-        if marker is None or len(re.findall(r"[\u4e00-\u9fff]", explanation)) < 8:
-            weak_retention.append(line)
-    if weak_retention:
-        errors.append("retention_analysis 存在只写关系标记、没有具体保留说明的条目")
+        retention_lines = [line.strip() for line in retention.splitlines() if line.strip()]
+        relationship = (
+            r"(?:fully_preserved|partially_preserved|attribute_transfer|weak_reference|"
+            r"fully_copy|partially_copy|reference)"
+        )
+        weak_retention = []
+        for line in retention_lines:
+            marker = re.search(relationship, line)
+            explanation = line[marker.end():] if marker else ""
+            explanation = re.sub(r"^[\s:：\-—–]+", "", explanation)
+            if marker is None or len(re.findall(r"[\u4e00-\u9fff]", explanation)) < 8:
+                weak_retention.append(line)
+        if weak_retention:
+            errors.append("retention_analysis 存在只写关系标记、没有具体保留说明的条目")
 
-    subjects = set(re.findall(r"<Subject\s+\d+>", _section_text(text, "subject_definitions")))
-    missing_subjects = sorted(subject for subject in subjects if subject not in details)
-    if missing_subjects:
-        errors.append("镜头正文没有实际使用这些主体标签：" + "、".join(missing_subjects))
+        subjects = set(re.findall(r"<Subject\s+\d+>", _section_text(text, "subject_definitions", sections)))
+        missing_subjects = sorted(subject for subject in subjects if subject not in details)
+        if missing_subjects:
+            errors.append("镜头正文没有实际使用这些主体标签：" + "、".join(missing_subjects))
 
     if soundscape.upper() != "N/A" and len(re.findall(r"[\u4e00-\u9fff]", soundscape)) < 25:
         errors.append("overall_soundscape 过于简略，没有覆盖持续环境声和关键物理音效")
@@ -660,7 +871,7 @@ def _quality_errors(text, duration):
             repeated_clauses.append(normalized[:36])
         seen_clauses.add(normalized)
     if repeated_clauses:
-        errors.append("detailed_description 存在重复长句：" + "、".join(repeated_clauses[:3]))
+        errors.append(f"{body_section} 存在重复长句：" + "、".join(repeated_clauses[:3]))
     return errors
 
 
@@ -886,6 +1097,10 @@ class Qwen36MultiImageH3ChinesePrompt:
         # With no reference image, automatic mode is a true text-to-video task.
         if not images and generation_type in {"自动判别", "Auto Detect"}:
             generation_type = "Text-to-Video"
+        # 正文模式和全参考模式的字段结构不同：正文用官方三段式，全参考才用六段式。
+        sections = _sections_for(generation_type)
+        system_prompt = BASE_SYSTEM_PROMPT if tuple(sections) == BASE_SECTION_NAMES else SYSTEM_PROMPT
+        body_section = _body_section(sections)
         if generation_type in {"图生视频", "首尾帧生成", "尾帧生成", "多参考生成", "Image-to-Video", "First/Last Frame", "Last Frame", "Multi-Reference"} and not images:
             raise ValueError(f"生成类型“{generation_type}”至少需要输入一张参考图片。")
         if generation_type in {"首尾帧生成", "First/Last Frame"} and len(images) < 2:
@@ -896,7 +1111,7 @@ class Qwen36MultiImageH3ChinesePrompt:
             generation_type, GENERATION_TYPE_INSTRUCTIONS["自动判别"]
         )
         creative_skill = _input_value(inputs, "Creative Skill", "创意技能", "Auto Detect")
-        creative_instruction = _official_skill_instruction(creative_skill)
+        creative_instruction = _official_skill_instruction(creative_skill, generation_type)
         unload_after_generation = bool(_input_value(inputs, "Unload Model After Generation", "生成后卸载模型", True))
         output_chinese = bool(_input_value(inputs, "Output Chinese Prompt", "输出中文提示词", False))
         language_instruction = (
@@ -904,6 +1119,14 @@ class Qwen36MultiImageH3ChinesePrompt:
             if output_chinese
             else "输出必须使用英文（官方字段名和格式标记保持不变）；不要翻译字段名。"
         )
+        if output_chinese:
+            # 官方规范原文里写着「用英文书写」，它会盖过系统提示的语言要求（规范在用户消息里、
+            # 位置更靠后）。开着中文输出时必须把这条追在规范后面显式覆盖掉。
+            creative_instruction += (
+                "\n\n注意：本节点已开启“输出中文提示词”，上面规范中“用英文书写”的要求由本条覆盖——"
+                "字段名与格式标记（integrated_multimodal_description、[Shot N]、<d>、<Picture N> 等）保持英文，"
+                "正文描述一律用简体中文；仅对白、歌词和画面内文字保留其原本语言。"
+            )
         description = _input_value(inputs, "Description", "简单描述", "").strip() or (
             "根据文字描述创作连贯、自然、有电影感的视频。" if not images
             else "根据参考图片创作连贯、自然、有电影感的视频。"
@@ -968,10 +1191,15 @@ class Qwen36MultiImageH3ChinesePrompt:
                 "下面是已经根据全部参考图片完成的内部视觉分析和分镜策划。充分使用其中的具体视觉细节，"
                 "但不要在最终输出中提及‘分析’或‘资料’：\n\n"
                 f"{visual_plan}\n\n"
-                "现在严格按照六段 Ref2VA 格式写出最终提示词。" + language_instruction
+                + (
+                    "现在严格按照上面给出的官方正文模式规范写出最终提示词，"
+                    "只输出 integrated_multimodal_description、overall_soundscape、non_diegetic_music 三个字段。"
+                    if tuple(sections) == BASE_SECTION_NAMES
+                    else "现在严格按照六段 Ref2VA 格式写出最终提示词。"
+                ) + language_instruction
             )
             messages = [
-                {"role": "system", "content": SYSTEM_PROMPT + "\n\n当前语言要求：" + language_instruction},
+                {"role": "system", "content": system_prompt + "\n\n当前语言要求：" + language_instruction},
                 {"role": "user", "content": final_request},
             ]
             prompt = _stream_completion(
@@ -985,34 +1213,50 @@ class Qwen36MultiImageH3ChinesePrompt:
                 repeat_penalty=1.12,
                 frequency_penalty=0.12,
             )
-            section_count = _h3_section_count(prompt)
+            section_count = _h3_section_count(prompt, sections)
             if section_count < 2 or _looks_like_internal_text(prompt):
                 raise RuntimeError(
                     "所选语言模型没有遵循 H3 写作指令，返回了内部说明或无关文本。"
                     "这通常是 Uncensored 微调模型的指令遵循问题，请更换 Instruct 模型或更换种子。"
                 )
-            prompt = _normalize_sections(prompt)
-            if _detail_is_short(prompt, duration) and len(_section_text(prompt, "detailed_description")) < 120:
-                expansion_request = (
-                    "只重写下面两个字段：retention_analysis 和 detailed_description。"
-                    "不要输出其他字段、解释、Markdown 或内部分析。\n\n"
-                    "retention_analysis 必须逐个使用 <Subject N> 或 <Picture N>，写明出现镜头，"
-                    "并严格使用 fully_preserved、partially_preserved、attribute_transfer 或 weak_reference，"
-                    "格式为：<Subject 1> (appears in [Shot 1], [Shot 2]): fully_preserved - 中文具体说明。"
-                    "禁止 [P1]、箭头、百分比或数字列表。\n\n"
-                    f"detailed_description 写到约 {max(180, min(700, round(duration * 45)))} 个中文汉字即可，"
-                    f"为 {duration:g} 秒视频安排自然数量的镜头（通常 1-3 个）。"
-                    "只补充必要的构图、动作、环境、运镜和声音，不要为了长度重复或过度复杂化。\n\n"
-                    f"目标画幅：{aspect_ratio}\n用户描述：{description}\n\n"
-                    f"视觉资料：\n{visual_plan}\n\n"
-                    f"主体定义：\n{_section_text(prompt, 'subject_definitions')}\n\n"
-                    f"当前保留分析：\n{_section_text(prompt, 'retention_analysis')}\n\n"
-                    f"当前过短正文：\n{_section_text(prompt, 'detailed_description')}"
-                )
+            prompt = _normalize_sections(prompt, sections)
+            prompt = _strip_type_heading(prompt, generation_type)
+            prompt = _normalize_shot_times(prompt)
+            if _detail_is_short(prompt, duration, sections) and len(_section_text(prompt, body_section, sections)) < 120:
+                if tuple(sections) == BASE_SECTION_NAMES:
+                    expansion_request = (
+                        "只重写 integrated_multimodal_description 这一个字段。"
+                        "不要输出其他字段、解释、Markdown 或内部分析。\n\n"
+                        f"写到约 {max(180, min(700, round(duration * 45)))} 个中文汉字即可，"
+                        f"为 {duration:g} 秒视频安排至少 {1 if duration <= 6 else 2 if duration <= 15 else 3} 个有明确分工的镜头。"
+                        "按 [Shot 1] / [Shot N] At MM:SS.mmm, 的时间轴写，交代构图、主体动作、环境、运镜和画内声音，"
+                        "不要为了长度重复、堆砌近义词或过度复杂化。\n\n"
+                        f"目标画幅：{aspect_ratio}\n用户描述：{description}\n\n"
+                        f"视觉资料：\n{visual_plan}\n\n"
+                        f"当前过短正文：\n{_section_text(prompt, body_section, sections)}"
+                    )
+                else:
+                    expansion_request = (
+                        "只重写下面两个字段：retention_analysis 和 detailed_description。"
+                        "不要输出其他字段、解释、Markdown 或内部分析。\n\n"
+                        "retention_analysis 必须逐个使用 <Subject N> 或 <Picture N>，写明出现镜头，"
+                        "并严格使用 fully_preserved、partially_preserved、attribute_transfer 或 weak_reference，"
+                        "格式为：<Subject 1> (appears in [Shot 1], [Shot 2]): fully_preserved - 中文具体说明。"
+                        "禁止 [P1]、箭头、百分比或数字列表。\n\n"
+                        f"detailed_description 写到约 {max(180, min(700, round(duration * 45)))} 个中文汉字即可，"
+                        f"为 {duration:g} 秒视频安排自然数量的镜头（通常 1-3 个）。"
+                        "只补充必要的构图、动作、环境、运镜和声音，不要为了长度重复或过度复杂化。\n\n"
+                        f"目标画幅：{aspect_ratio}\n用户描述：{description}\n\n"
+                        f"视觉资料：\n{visual_plan}\n\n"
+                        f"主体定义：\n{_section_text(prompt, 'subject_definitions', sections)}\n\n"
+                        f"当前保留分析：\n{_section_text(prompt, 'retention_analysis', sections)}\n\n"
+                        f"当前过短正文：\n{_section_text(prompt, 'detailed_description', sections)}"
+                    )
                 expansion = _stream_completion(
                     llm,
                     messages=[
-                        {"role": "system", "content": SYSTEM_PROMPT},
+                        # 补写这一步以前不带语言要求，中文开关会被它悄悄改成英文输出。
+                        {"role": "system", "content": system_prompt + "\n\n当前语言要求：" + language_instruction},
                         {"role": "user", "content": expansion_request},
                     ],
                     stage="正文补写",
@@ -1023,15 +1267,25 @@ class Qwen36MultiImageH3ChinesePrompt:
                     repeat_penalty=1.15,
                     frequency_penalty=0.15,
                 )
-                expansion = _normalize_sections(expansion)
-                new_retention = _section_text(expansion, "retention_analysis")
-                new_details = _section_text(expansion, "detailed_description")
-                if new_retention and new_retention.upper() != "N/A":
-                    prompt = _replace_section(prompt, "retention_analysis", new_retention)
-                if new_details and new_details.upper() != "N/A":
-                    prompt = _replace_section(prompt, "detailed_description", new_details)
-            errors = _quality_errors(prompt, duration)
-            format_error = _format_error(prompt)
+                expansion = _normalize_sections(expansion, sections)
+                if tuple(sections) == BASE_SECTION_NAMES:
+                    new_body = _section_text(expansion, body_section, sections)
+                    if new_body and new_body.upper() != "N/A":
+                        prompt = _replace_section(prompt, body_section, new_body, sections)
+                else:
+                    new_retention = _section_text(expansion, "retention_analysis", sections)
+                    new_details = _section_text(expansion, "detailed_description", sections)
+                    if new_retention and new_retention.upper() != "N/A":
+                        prompt = _replace_section(prompt, "retention_analysis", new_retention, sections)
+                    if new_details and new_details.upper() != "N/A":
+                        prompt = _replace_section(prompt, "detailed_description", new_details, sections)
+            # 补写回来的正文同样要过一遍清洗：模型经常把 Shot 1 的时间戳写回来、
+            # 或者又把时间写成 00:1.5 这种简写。
+            prompt = _strip_type_heading(_normalize_shot_times(prompt), generation_type)
+            if not images:
+                prompt = _strip_t2va_alignment(prompt)
+            errors = _quality_errors(prompt, duration, sections)
+            format_error = _format_error(prompt, sections)
             if format_error:
                 print("[H3 中文提示词] 格式检查提示：" + format_error)
             if errors:

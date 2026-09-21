@@ -1,5 +1,15 @@
 from .nodes import NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS
+from .qwen_image21_pe import QwenImage21PromptEnhancer
 from . import api  # noqa: F401
+
+NODE_CLASS_MAPPINGS = {
+    **NODE_CLASS_MAPPINGS,
+    "QwenImage21PromptEnhancer": QwenImage21PromptEnhancer,
+}
+NODE_DISPLAY_NAME_MAPPINGS = {
+    **NODE_DISPLAY_NAME_MAPPINGS,
+    "QwenImage21PromptEnhancer": "Qwen Image 2.1 Prompt Enhancer",
+}
 
 
 def _patch_recursive_input_images():

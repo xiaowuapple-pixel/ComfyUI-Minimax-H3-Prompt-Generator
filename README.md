@@ -27,6 +27,7 @@
 - 提供常用画面比例：1:1、4:3、3:4、16:9、9:16、2:3、21:9，也可自动判断
 - 生成时会把画面比例作为构图约束，考虑主体尺度、取景、裁切边界和留白
 - 提供随机种子：固定种子可复现生成结果，设为 `-1` 时每次执行都会绕过缓存并重新随机
+- Qwen Image 2.1 Prompt Enhancer：封装官方 prompt_rewrite 工具链，把简短需求扩写成 2.1 用的长提示词
 - 提供「上下文长度」参数：决定 KV 缓存的显存占用，显存不足时调小可让更大的模型放进显卡
 - 上下文调小后会自动压缩单次输出上限，避免生成到一半被截断
 - 提供「Enable Thinking」开关（默认关闭）：开启后让推理模型先内部思考再输出，思考内容不会写进提示词
@@ -53,6 +54,38 @@ pip install -r requirements-local-gguf.txt
 GPU 卸载层数默认为 `-1`，表示全部放入显存；显存不足时可改为 16-24。
 
 在线模式要求服务支持 OpenAI 多模态消息格式；API Key 只在节点运行时使用，不写入文件。
+
+### Qwen Image 2.1 Prompt Enhancer
+
+把官方 [prompt_rewrite](https://github.com/QwenLM/Qwen-Image-2.1/tree/main/prompt_rewrite)
+工具链封装成一个节点。它用的是 Qwen-Image-2.1 官方提示词增强模型
+（PE-T2I / PE-I2I，基于 Qwen3.5-VL 9B 微调），把简短需求扩写成 2.1 真正吃的长提示词。
+
+- 两个任务各有独立权重和独立系统提示词，节点已原样内置在 `pe_prompts/`，不会与权重脱节
+- 输出四路：`Positive Prompt`、`WH Ratio`、`Ratio Follow`、`Parse OK`
+- `t2i` 只接受文字；`edit` 需要 1-4 张参考图，模型会按顺序用 `<image1>`… 引用，顺序不能乱
+- 思考块始终开启（官方要求），思考内容不会写进提示词
+- 采样默认使用官方出厂值：`t2i` 的 `presence_penalty=1.5`，`edit` 为 `0`；切成 `Custom` 才能手改
+- 本地 GGUF 与在线 LLM 都支持，和 H3 Prompt 共用同一套运行时
+- 解析失败时 `Positive Prompt` 回退为原始回答文本，并输出 `Parse OK=false`，不会静默丢结果
+
+建议的本地模型（适配 16GB 显存，来源见下方链接）：
+
+| 用途 | 文件 | 大小 |
+| --- | --- | --- |
+| t2i | `Qwen-Image-2.1-PE-T2I.Q5_K_M.gguf` | 6.02 GB |
+| t2i（更省显存） | `Qwen-Image-2.1-PE-T2I.Q4_K_M.gguf` | 5.24 GB |
+| edit | `Qwen-Image-2.1-PE-I2I.Q5_K_M.gguf` + `Qwen-Image-2.1-PE-I2I.mmproj-bf16.gguf` | 6.02 + 0.86 GB |
+| edit（更省显存） | `Qwen-Image-2.1-PE-I2I.Q4_K_M.gguf` + `Qwen-Image-2.1-PE-I2I.mmproj-bf16.gguf` | 5.24 + 0.86 GB |
+
+- 量化版：[Qwen-Image-2.1-PE-T2I-GGUF](https://huggingface.co/prithivMLmods/Qwen-Image-2.1-PE-T2I-GGUF)、[Qwen-Image-2.1-PE-I2I-GGUF](https://huggingface.co/prithivMLmods/Qwen-Image-2.1-PE-I2I-GGUF)
+- 官方权重：[Qwen/Qwen-Image-2.1-PE-T2I](https://huggingface.co/Qwen/Qwen-Image-2.1-PE-T2I)、[Qwen/Qwen-Image-2.1-PE-I2I](https://huggingface.co/Qwen/Qwen-Image-2.1-PE-I2I)（bf16 约 20 GB，16GB 显卡放不下）
+
+推荐设置：`Context Length` 用 `32768`（PE 输出很长，官方 t2i 允许 16256 个新 token），
+`GPU Offload Layers` 用 `-1`。把基座模型（例如普通的 Qwen3.5-9B）填进去也能跑，
+但它没按这套系统提示词训练过，`Parse OK` 基本会是 false。
+
+参考：[官方 prompt_rewrite 文档](https://github.com/QwenLM/Qwen-Image-2.1/tree/main/prompt_rewrite)
 
 ## English
 
@@ -81,11 +114,41 @@ generation-type selection, creative skill selection, and English/Chinese output.
 - Common aspect ratios are available: 1:1, 4:3, 3:4, 16:9, 9:16, 2:3, and 21:9, plus Auto
 - The selected ratio is treated as a composition constraint for framing, subject scale, crop boundaries, and negative space
 - A Seed control is available: fixed seeds improve reproducibility; `-1` bypasses the execution cache and selects a new random seed on every run
+- Qwen Image 2.1 Prompt Enhancer: wraps the official prompt_rewrite toolchain to expand a short request into a 2.1-ready long prompt
 - A Context Length control sets the KV-cache footprint, so a smaller window lets a larger model stay on the GPU
 - A smaller context length automatically trims the per-call reply budget so responses are not cut off halfway
 - An Enable Thinking switch (off by default) lets reasoning models think internally while the reasoning is kept out of the prompt output
 - The chat handler is chosen from the GGUF metadata rather than the file name, so newer names such as Qwen3.8 still get the correct chat template
 - Both formats output positive prompts only; no negative prompts, negative tags, or exclusions are generated
+
+### Qwen Image 2.1 Prompt Enhancer
+
+Wraps the official
+[prompt_rewrite](https://github.com/QwenLM/Qwen-Image-2.1/tree/main/prompt_rewrite) toolchain.
+It drives the official Qwen-Image-2.1 prompt-enhancer checkpoints (PE-T2I / PE-I2I, fine-tuned
+Qwen3.5-VL 9B) and turns a short request into the long prompt 2.1 expects.
+
+- Each task has its own checkpoint and its own system prompt; both prompts ship verbatim in `pe_prompts/`
+- Four outputs: `Positive Prompt`, `WH Ratio`, `Ratio Follow`, `Parse OK`
+- `t2i` takes text only; `edit` takes 1-4 reference images, referenced as `<image1>`... in connection order
+- Thinking stays on (required by the official models) and never leaks into the prompt
+- Official per-task sampling by default (`presence_penalty` 1.5 for t2i, 0 for edit); switch to `Custom` to override
+- Local GGUF and hosted LLM sources, sharing the same runtime as H3 Prompt
+- On a parse failure `Positive Prompt` falls back to the raw answer and `Parse OK` is false, so nothing is lost silently
+
+Suggested local models for a 16 GB card ([Qwen-Image-2.1-PE-T2I-GGUF](https://huggingface.co/prithivMLmods/Qwen-Image-2.1-PE-T2I-GGUF),
+[Qwen-Image-2.1-PE-I2I-GGUF](https://huggingface.co/prithivMLmods/Qwen-Image-2.1-PE-I2I-GGUF)):
+
+| Task | Files | Size |
+| --- | --- | --- |
+| t2i | `Qwen-Image-2.1-PE-T2I.Q5_K_M.gguf` | 6.02 GB |
+| t2i (leaner) | `Qwen-Image-2.1-PE-T2I.Q4_K_M.gguf` | 5.24 GB |
+| edit | `Qwen-Image-2.1-PE-I2I.Q5_K_M.gguf` + `Qwen-Image-2.1-PE-I2I.mmproj-bf16.gguf` | 6.02 + 0.86 GB |
+| edit (leaner) | `Qwen-Image-2.1-PE-I2I.Q4_K_M.gguf` + `Qwen-Image-2.1-PE-I2I.mmproj-bf16.gguf` | 5.24 + 0.86 GB |
+
+Use `Context Length` 32768 (PE answers are long; official t2i allows 16256 new tokens) and
+`GPU Offload Layers` -1. A stock base model will load too, but it was never trained against these
+system prompts, so `Parse OK` will be false on most runs.
 
 ### Installation
 
