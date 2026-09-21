@@ -227,8 +227,22 @@ def _load_system_prompt(task, override_path):
     The answer contract is part of what the weights were trained on, so the
     prompt has to travel with the checkpoint. Swapping tasks and forgetting to
     swap the prompt fails silently: fluent output with the wrong contract.
+
+    A missing override falls back to the bundled prompt instead of refusing to
+    run. Saved workflows break this field by no fault of their own: the loaders
+    gained and lost widgets over time, and a workflow stores widget values by
+    position, so an older file can hand a Context Length value to this one
+    (measured: "24576"). Falling back keeps that workflow working, and the
+    warning says where the stray value came from.
     """
     path = (override_path or "").strip()
+    if path and not os.path.isfile(path):
+        print(
+            f"[Qwen Image 2.1 PE] 警告：System Prompt File 指定的文件不存在（{path}），"
+            "已改用官方的系统提示词。这种情况通常来自旧工作流：加载节点上的控件顺序变过，"
+            "把加载节点删掉、重新添加一个就对上了。"
+        )
+        path = ""
     if not path:
         path = os.path.join(PROMPT_DIR, PE_PROFILES[task]["prompt_file"])
     if not os.path.isfile(path):
@@ -673,6 +687,25 @@ def _pe_bundle(source, **values):
     return bundle
 
 
+def _report_bundle(bundle):
+    """Print what the loader actually resolved, once per run.
+
+    A workflow stores widget values by position, so a node whose controls were
+    re-ordered can quietly hand one control another's value (the "24576" that
+    ended up in System Prompt File came from exactly that). Printing the resolved
+    settings turns this into a line you can read instead of a puzzle.
+    """
+    window = (
+        f" | 上下文={bundle['context_length']}" if bundle["source"] == SOURCE_GGUF else ""
+    )
+    print(
+        f"[Qwen Image 2.1 PE] 加载节点：{bundle['source']}{window}"
+        f" | 系统提示词={'自定义文件' if bundle['system_prompt_file'] else '官方内置'}"
+        f" | 思考={'开' if bundle['thinking'] else '关'}"
+        f" | 用完{'卸载' if bundle['unload'] else '保留'}"
+    )
+
+
 def _task_model(bundle, task):
     """The file this run should use: the two tasks have their own checkpoint.
 
@@ -742,16 +775,16 @@ class QwenImage21PELoaderSafetensors:
     DESCRIPTION = "Load the official Qwen-Image-2.1 PE encoders (text_encoders) for the enhancer node."
 
     def build(self, **inputs):
-        return (
-            _pe_bundle(
-                SOURCE_AUTO,
-                t2i_model=inputs.get("T2I Encoder", ""),
-                i2i_model=inputs.get("I2I Encoder", ""),
-                system_prompt_file=inputs.get("System Prompt File", ""),
-                thinking=bool(inputs.get("Thinking", False)),
-                unload=bool(inputs.get("Unload Model After Generation", True)),
-            ),
+        bundle = _pe_bundle(
+            SOURCE_AUTO,
+            t2i_model=inputs.get("T2I Encoder", ""),
+            i2i_model=inputs.get("I2I Encoder", ""),
+            system_prompt_file=inputs.get("System Prompt File", ""),
+            thinking=bool(inputs.get("Thinking", False)),
+            unload=bool(inputs.get("Unload Model After Generation", True)),
         )
+        _report_bundle(bundle)
+        return (bundle,)
 
 
 class QwenImage21PELoaderGGUF:
@@ -831,21 +864,21 @@ class QwenImage21PELoaderGGUF:
     DESCRIPTION = "Load a Qwen-Image-2.1 PE checkpoint as GGUF (llama.cpp) for the enhancer node."
 
     def build(self, **inputs):
-        return (
-            _pe_bundle(
-                SOURCE_GGUF,
-                t2i_model=inputs.get("T2I GGUF", ""),
-                i2i_model=inputs.get("I2I GGUF", ""),
-                vision_model=inputs.get("Vision Model", ""),
-                gpu_layers=int(inputs.get("GPU Offload Layers", -1)),
-                context_length=int(
-                    inputs.get("Context Length", DEFAULT_CONTEXT_LENGTH) or DEFAULT_CONTEXT_LENGTH
-                ),
-                system_prompt_file=inputs.get("System Prompt File", ""),
-                thinking=bool(inputs.get("Thinking", False)),
-                unload=bool(inputs.get("Unload Model After Generation", True)),
+        bundle = _pe_bundle(
+            SOURCE_GGUF,
+            t2i_model=inputs.get("T2I GGUF", ""),
+            i2i_model=inputs.get("I2I GGUF", ""),
+            vision_model=inputs.get("Vision Model", ""),
+            gpu_layers=int(inputs.get("GPU Offload Layers", -1)),
+            context_length=int(
+                inputs.get("Context Length", DEFAULT_CONTEXT_LENGTH) or DEFAULT_CONTEXT_LENGTH
             ),
+            system_prompt_file=inputs.get("System Prompt File", ""),
+            thinking=bool(inputs.get("Thinking", False)),
+            unload=bool(inputs.get("Unload Model After Generation", True)),
         )
+        _report_bundle(bundle)
+        return (bundle,)
 
 
 class QwenImage21PESettings:
