@@ -63,6 +63,7 @@ GPU 卸载层数默认为 `-1`，表示全部放入显存；显存不足时可�
 
 - 两个任务各有独立权重和独立系统提示词，节点已原样内置在 `pe_prompts/`，不会与权重脱节
 - 输出四路：`Positive Prompt`、`WH Ratio`、`Ratio Follow`、`Parse OK`
+- 另外输出 `Width` / `Height` 两个整数：t2i 按模型选的画幅 + `Target Megapixels` 换算，edit 直接沿用参考图尺寸
 - `t2i` 只接受文字；`edit` 需要 1-4 张参考图，模型会按顺序用 `<image1>`… 引用，顺序不能乱
 - 思考块始终开启（官方要求），思考内容不会写进提示词
 - 采样默认使用官方出厂值：`t2i` 的 `presence_penalty=1.5`，`edit` 为 `0`；切成 `Custom` 才能手改
@@ -82,6 +83,16 @@ GPU 卸载层数默认为 `-1`，表示全部放入显存；显存不足时可�
 两个 PE 编码器各 8.8 GB，不可能同时放进 16GB 显卡，所以节点全程只驻留一个：
 只有在真正需要时才载入，切换任务时先释放另一个，`Unload Model After Generation` 打开时用完即放。
 释放只丢掉编码器自己的引用（实测 14.6 GB → 1.4 GB），**不会牵连你的扩散模型**。
+
+输出怎么接：
+
+| 输出 | 接到哪 |
+| --- | --- |
+| `Positive Prompt` | 2.1 的文本编码节点（`CLIPTextEncode` / `TextEncodeQwenImage21`）的正向输入 |
+| `Width` / `Height` | 直接接 `空Latent`（EmptyLatentImage）的 width/height。这是最省事的一路 |
+| `WH Ratio` | 不用接，是模型选画幅的原始记录（形如 `16:9`）。注意官方 `分辨率选择器` 的选项带后缀（`16:9 (Widescreen)`），直接连过去校验不过，所以宽高已经帮你算好了 |
+| `Ratio Follow` | 不用接，edit 专用信息（形如 `<image1>`），表示输出沿用哪张参考图的画幅 |
+| `Parse OK` | 不用接。`false` 表示模型没吐出预期 JSON，此时 `Positive Prompt` 是原始回答文本，可以用来判断这次结果要不要用 |
 
 官方 PE 编码器（放到 `models/text_encoders/`）：
 
@@ -167,7 +178,8 @@ It drives the official Qwen-Image-2.1 prompt-enhancer checkpoints (PE-T2I / PE-I
 Qwen3.5-VL 9B) and turns a short request into the long prompt 2.1 expects.
 
 - Each task has its own checkpoint and its own system prompt; both prompts ship verbatim in `pe_prompts/`
-- Four outputs: `Positive Prompt`, `WH Ratio`, `Ratio Follow`, `Parse OK`
+- Six outputs: `Positive Prompt`, `WH Ratio`, `Ratio Follow`, `Parse OK`, `Width`, `Height`
+- `Width` / `Height` are pixels: t2i scales the model's ratio to `Target Megapixels`, edit reuses the source image's size
 - `t2i` takes text only; `edit` takes 1-4 reference images, referenced as `<image1>`... in connection order
 - Thinking stays on (required by the official models) and never leaks into the prompt
 - Official per-task sampling by default (`presence_penalty` 1.5 for t2i, 0 for edit); switch to `Custom` to override
@@ -188,6 +200,16 @@ and the node picks the matching weights and system prompt by itself. The two PE 
 cannot both fit a 16 GB card, so only one is ever resident: it is loaded on first need, the other is released
 when the task switches, and `Unload Model After Generation` frees it after the run. That release only drops the
 encoder's own reference (measured 14.6 GB -> 1.4 GB) and never touches your diffusion model.
+
+Where the outputs go:
+
+| Output | Destination |
+| --- | --- |
+| `Positive Prompt` | the positive side of the 2.1 text encoder (`CLIPTextEncode` / `TextEncodeQwenImage21`) |
+| `Width` / `Height` | straight into an Empty Latent Image (or any width/height input) -- the simplest path |
+| `WH Ratio` | leave unconnected; it is the model's own record of the canvas (`16:9`). The core Resolution Selector expects labels with suffixes (`16:9 (Widescreen)`), so a direct link will not validate -- that is why Width/Height are computed for you |
+| `Ratio Follow` | leave unconnected; edit only, names the reference image whose framing the output keeps (`<image1>`) |
+| `Parse OK` | leave unconnected; `false` means the answer was not the expected JSON and Positive Prompt holds the raw text |
 
 Official PE encoders (put them in `models/text_encoders/`):
 

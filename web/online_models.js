@@ -3,12 +3,12 @@ import { api } from "/scripts/api.js";
 
 // Prompt nodes that expose the shared online-LLM widgets (request URL, API key
 // and model name) and use the same backend route to list hosted models.
-const PICKER_NODES = new Set(["H3Prompt", "H3ImagePromptGenerator"]);
+const PICKER_NODES = new Set(["H3Prompt", "H3ImagePromptGenerator", "QwenImage21PromptEnhancer"]);
 
 // H3 Prompt places its refresh button directly under the model combo. Newer
 // nodes append the button at the end of the widget list so the values already
 // stored in saved workflows keep pointing at the same widgets.
-const APPEND_BUTTON_NODES = new Set(["H3ImagePromptGenerator"]);
+const APPEND_BUTTON_NODES = new Set(["H3ImagePromptGenerator", "QwenImage21PromptEnhancer"]);
 
 const LEGACY_WIDGET_VALUES = {
     "自动判别": "Auto Detect",

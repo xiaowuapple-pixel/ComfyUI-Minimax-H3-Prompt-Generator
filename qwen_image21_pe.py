@@ -19,8 +19,10 @@ from __future__ import annotations
 import json
 import inspect
 import hashlib
+import math
 import os
 import random
+import re
 
 import numpy as np
 
@@ -373,6 +375,57 @@ def _run_native_clip(clip, prompt, images, profile, system_prompt, sampling):
     return clip.decode(generated)
 
 
+def _ratio_to_pair(text):
+    """Parse the model's own ratio format ("16:9") into (width, height)."""
+    match = re.match(r"\s*(\d+)\s*[:：xX×]\s*(\d+)\s*$", text or "")
+    if not match:
+        return None
+    width, height = int(match.group(1)), int(match.group(2))
+    return (width, height) if width > 0 and height > 0 else None
+
+
+def _canvas_from_pair(pair, megapixels, multiple=8):
+    """Pixel size at the given ratio. Same math as the Resolution Selector."""
+    w_ratio, h_ratio = pair
+    scale = math.sqrt(float(megapixels) * 1024 * 1024 / (w_ratio * h_ratio))
+    width = round(w_ratio * scale / multiple) * multiple
+    height = round(h_ratio * scale / multiple) * multiple
+    return max(multiple, int(width)), max(multiple, int(height))
+
+
+def _canvas_from_image(image, multiple=8):
+    """Framing of one source image, used by edit runs (ratio_follow names it)."""
+    height, width = int(image.shape[-3]), int(image.shape[-2])
+    return (
+        max(multiple, round(width / multiple) * multiple),
+        max(multiple, round(height / multiple) * multiple),
+    )
+
+
+def _image_index(text):
+    match = re.search(r"(\d+)", text or "")
+    return int(match.group(1)) - 1 if match else -1
+
+
+def _resolve_canvas(parsed, images, megapixels, multiple=8):
+    """Pixel size for the render, so WH Ratio is usable without hand-copying.
+
+    t2i: the model picked the ratio, the megapixel budget is yours.
+    edit: `ratio_follow` names the source image whose framing the output keeps,
+    so the answer is that image's own size -- rescaling it would defeat the point.
+    """
+    pair = _ratio_to_pair(parsed.get("wh_ratio") or "")
+    if parsed.get("parse_ok"):
+        follow = (parsed.get("ratio_follow") or "").strip()
+        if follow:
+            index = _image_index(follow)
+            if 0 <= index < len(images):
+                return _canvas_from_image(images[index], multiple)
+        if pair:
+            return _canvas_from_pair(pair, megapixels, multiple)
+    return _canvas_from_pair(pair or (1, 1), megapixels, multiple)
+
+
 def _cache_dir():
     import folder_paths
 
@@ -542,6 +595,17 @@ class QwenImage21PromptEnhancer:
                         "tooltip": "模型来源选 Local safetensors (auto) 时，改图任务用的 PE 编码器。",
                     },
                 ),
+                "Target Megapixels": (
+                    "FLOAT",
+                    {
+                        "default": 2.0,
+                        "min": 0.1,
+                        "max": 16.0,
+                        "step": 0.1,
+                        "tooltip": "Width/Height 两路输出按这个像素总量换算。"
+                                   "t2i 用模型选的画幅比例；edit 直接沿用参考图的尺寸，不受这里影响。",
+                    },
+                ),
             },
             "optional": {
                 **{f"Image {index}": ("IMAGE",) for index in range(1, MAX_INPUT_IMAGES + 1)},
@@ -555,8 +619,8 @@ class QwenImage21PromptEnhancer:
             },
         }
 
-    RETURN_TYPES = ("STRING", "STRING", "STRING", "BOOLEAN")
-    RETURN_NAMES = ("Positive Prompt", "WH Ratio", "Ratio Follow", "Parse OK")
+    RETURN_TYPES = ("STRING", "STRING", "STRING", "BOOLEAN", "INT", "INT")
+    RETURN_NAMES = ("Positive Prompt", "WH Ratio", "Ratio Follow", "Parse OK", "Width", "Height")
     FUNCTION = "enhance"
     CATEGORY = "MiniMax H3/Prompt"
     DESCRIPTION = "Official Qwen-Image-2.1 prompt enhancer (PE-T2I / PE-I2I) for local GGUF or online LLMs."
@@ -600,6 +664,7 @@ class QwenImage21PromptEnhancer:
         context_length = int(inputs.get("Context Length", DEFAULT_CONTEXT_LENGTH) or DEFAULT_CONTEXT_LENGTH)
         requested = int(inputs.get("Max New Tokens", 0) or 0) or profile["max_new_tokens"]
         system_prompt = _load_system_prompt(task, inputs.get("System Prompt File", ""))
+        megapixels = float(inputs.get("Target Megapixels", 2.0) or 2.0)
         source = inputs.get("Model Source", SOURCE_GGUF)
         if source in (SOURCE_CLIP, SOURCE_AUTO):
             # ComfyUI grows the KV cache with the request, so there is no fixed
@@ -641,11 +706,14 @@ class QwenImage21PromptEnhancer:
                     "[Qwen Image 2.1 PE] 命中缓存（相同请求 + 相同种子），跳过生成。"
                     "需要重新生成请关掉 Use Cache 或清空 user/qwen_image21_pe_cache。"
                 )
+                width, height = _resolve_canvas(cached, images, megapixels)
                 return (
                     cached.get("positive_prompt", ""),
                     cached.get("wh_ratio", ""),
                     cached.get("ratio_follow", ""),
                     bool(cached.get("parse_ok", False)),
+                    width,
+                    height,
                 )
 
         content = []
@@ -706,7 +774,7 @@ class QwenImage21PromptEnhancer:
             thinking, answer = _split_thinking(raw)
             parsed = _parse_answer(answer, task)
             self._report(parsed)
-            return self._store(parsed, cache_key, task, prompt)
+            return self._store(parsed, cache_key, task, prompt, images, megapixels)
 
         online = source == SOURCE_ONLINE
         if online:
@@ -761,18 +829,23 @@ class QwenImage21PromptEnhancer:
         thinking, answer = _split_thinking(raw)
         parsed = _parse_answer(answer, task)
         self._report(parsed)
-        return self._store(parsed, cache_key, task, prompt)
+        return self._store(parsed, cache_key, task, prompt, images, megapixels)
 
     @staticmethod
-    def _store(parsed, cache_key, task, prompt):
+    def _store(parsed, cache_key, task, prompt, images, megapixels):
+        width, height = _resolve_canvas(parsed, images, megapixels)
         result = (
             parsed["positive_prompt"],
             parsed["wh_ratio"],
             parsed["ratio_follow"],
             parsed["parse_ok"],
+            width,
+            height,
         )
         if cache_key:
-            _cache_write(cache_key, task, prompt, result)
+            # The canvas is derived from the answer, not generated, so only the
+            # model's own four fields are worth storing.
+            _cache_write(cache_key, task, prompt, result[:4])
         return result
 
     @staticmethod
