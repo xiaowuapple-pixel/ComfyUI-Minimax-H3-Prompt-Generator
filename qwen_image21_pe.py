@@ -56,8 +56,11 @@ MAX_INPUT_IMAGES = 4
 # else in the graph.
 SOURCE_GGUF = "Local GGUF"
 SOURCE_CLIP = "Local safetensors (CLIP)"
+SOURCE_AUTO = "Local safetensors (auto)"
 SOURCE_ONLINE = "Online LLM"
-MODEL_SOURCES = [SOURCE_GGUF, SOURCE_CLIP, SOURCE_ONLINE]
+MODEL_SOURCES = [SOURCE_GGUF, SOURCE_AUTO, SOURCE_CLIP, SOURCE_ONLINE]
+
+TASK_AUTO = "Auto (by images)"
 
 _VISION_BLOCK = "<|vision_start|><|image_pad|><|vision_end|>"
 
@@ -96,10 +99,85 @@ PE_PROFILES = {
 
 TASK_LABELS = [profile["label"] for profile in PE_PROFILES.values()]
 _LABEL_TO_TASK = {profile["label"]: key for key, profile in PE_PROFILES.items()}
+ALL_TASK_LABELS = [TASK_AUTO] + TASK_LABELS
 
 
 def _task_key(label):
     return _LABEL_TO_TASK.get(label, "t2i")
+
+
+def _resolve_task(label, has_images):
+    """Pick the task. Auto reads the graph: images in means an edit request.
+
+    'edit' with no image and 't2i' with images are both errors in the official
+    tooling, so the presence of images is the whole decision -- there is nothing
+    else the model could be asked to do.
+    """
+    if label == TASK_AUTO:
+        return "edit" if has_images else "t2i"
+    return _task_key(label)
+
+
+def _text_encoder_choices():
+    import folder_paths
+
+    return folder_paths.get_filename_list("text_encoders") or ["No text encoders found"]
+
+
+def _default_encoder(names, marker):
+    for name in names:
+        if marker in name.lower():
+            return name
+    return names[0] if names else "No text encoders found"
+
+
+_ENCODER_CACHE = {}
+
+
+def _release_encoder(name=None):
+    """Drop a loaded PE encoder and hand the VRAM back.
+
+    Dropping the last reference is enough -- measured 14.6 GB -> 1.4 GB with
+    nothing else resident -- so this deliberately does NOT call
+    `unload_all_models()`, which would also evict the diffusion model the rest of
+    the workflow is about to use.
+    """
+    import gc
+
+    import comfy.model_management
+
+    if name is not None and name in _ENCODER_CACHE:
+        _ENCODER_CACHE.pop(name, None)
+    else:
+        _ENCODER_CACHE.clear()
+    gc.collect()
+    comfy.model_management.soft_empty_cache()
+
+
+def _load_encoder(filename):
+    """Load one PE encoder, keeping at most one of them resident.
+
+    The two checkpoints are 8.8 GB each, so holding both would not fit a 16 GB
+    card. Only the one this run needs is loaded, and switching tasks drops the
+    other one first.
+    """
+    import comfy.sd
+    import folder_paths
+
+    for other in [name for name in _ENCODER_CACHE if name != filename]:
+        _release_encoder(other)
+    cached = _ENCODER_CACHE.get(filename)
+    if cached is not None:
+        return cached
+
+    path = folder_paths.get_full_path_or_raise("text_encoders", filename)
+    clip = comfy.sd.load_clip(
+        ckpt_paths=[path],
+        embedding_directory=folder_paths.get_folder_paths("embeddings"),
+        clip_type=comfy.sd.CLIPType.QWEN_IMAGE,
+    )
+    _ENCODER_CACHE[filename] = clip
+    return clip
 
 
 def _load_system_prompt(task, override_path):
@@ -362,6 +440,7 @@ class QwenImage21PromptEnhancer:
     def INPUT_TYPES(cls):
         models = _language_models() or ["No language models found"]
         vision_models = _vision_models() or ["No vision models found"]
+        encoders = _text_encoder_choices()
         return {
             "required": {
                 "Prompt": (
@@ -373,10 +452,11 @@ class QwenImage21PromptEnhancer:
                     },
                 ),
                 "Task": (
-                    TASK_LABELS,
+                    ALL_TASK_LABELS,
                     {
-                        "default": TASK_LABELS[0],
-                        "tooltip": "t2i：把简短描述扩写成成片画面的长提示词（只要文字）。"
+                        "default": TASK_AUTO,
+                        "tooltip": "Auto：连了图片就走 edit，没连图片就走 t2i，节点自己按这个选权重。"
+                                   "t2i：把简短描述扩写成成片画面的长提示词（只要文字）。"
                                    "edit：把改图指令加上参考图写成精确指令。"
                                    "两个任务用的是不同权重和不同系统提示词，不能互换。",
                     },
@@ -448,6 +528,20 @@ class QwenImage21PromptEnhancer:
                                    "缓存目录：ComfyUI/user/qwen_image21_pe_cache。",
                     },
                 ),
+                "T2I Encoder": (
+                    encoders,
+                    {
+                        "default": _default_encoder(encoders, "pe_t2i"),
+                        "tooltip": "模型来源选 Local safetensors (auto) 时，文生图任务用的 PE 编码器。",
+                    },
+                ),
+                "I2I Encoder": (
+                    encoders,
+                    {
+                        "default": _default_encoder(encoders, "pe_i2i"),
+                        "tooltip": "模型来源选 Local safetensors (auto) 时，改图任务用的 PE 编码器。",
+                    },
+                ),
             },
             "optional": {
                 **{f"Image {index}": ("IMAGE",) for index in range(1, MAX_INPUT_IMAGES + 1)},
@@ -468,8 +562,6 @@ class QwenImage21PromptEnhancer:
     DESCRIPTION = "Official Qwen-Image-2.1 prompt enhancer (PE-T2I / PE-I2I) for local GGUF or online LLMs."
 
     def enhance(self, **inputs):
-        task = _task_key(inputs.get("Task", TASK_LABELS[0]))
-        profile = PE_PROFILES[task]
         prompt = (inputs.get("Prompt") or "").strip()
         if not prompt:
             raise ValueError("Prompt 不能为空。")
@@ -479,6 +571,10 @@ class QwenImage21PromptEnhancer:
             for index in range(1, MAX_INPUT_IMAGES + 1)
             if inputs.get(f"Image {index}") is not None
         ]
+        task = _resolve_task(inputs.get("Task", TASK_AUTO), bool(images))
+        profile = PE_PROFILES[task]
+        if inputs.get("Task", TASK_AUTO) == TASK_AUTO:
+            print(f"[Qwen Image 2.1 PE] 自动判断任务：{'Image Edit (edit)' if task == 'edit' else 'Text to Image (t2i)'}")
         if profile["takes_images"] and not images:
             raise ValueError("edit 任务至少需要一张输入图片，请连接 Image 1。")
         if not profile["takes_images"] and images:
@@ -505,7 +601,7 @@ class QwenImage21PromptEnhancer:
         requested = int(inputs.get("Max New Tokens", 0) or 0) or profile["max_new_tokens"]
         system_prompt = _load_system_prompt(task, inputs.get("System Prompt File", ""))
         source = inputs.get("Model Source", SOURCE_GGUF)
-        if source == SOURCE_CLIP:
+        if source in (SOURCE_CLIP, SOURCE_AUTO):
             # ComfyUI grows the KV cache with the request, so there is no fixed
             # window to trim against here.
             max_tokens = requested
@@ -566,29 +662,47 @@ class QwenImage21PromptEnhancer:
             {"role": "user", "content": content},
         ]
 
-        if source == SOURCE_CLIP:
-            clip = inputs.get("clip")
-            if clip is None:
-                raise ValueError(
-                    "模型来源选了 Local safetensors (CLIP)，但没有连接 clip。"
-                    "请用 CLIPLoader 加载 PE 编码器后接到本节点的 clip 输入。"
+        if source in (SOURCE_CLIP, SOURCE_AUTO):
+            if source == SOURCE_AUTO:
+                encoder = inputs.get("T2I Encoder" if task == "t2i" else "I2I Encoder", "")
+                if not encoder or encoder == "No text encoders found":
+                    raise ValueError(
+                        "没有可用的文本编码器。请把官方 PE 权重放进 models/text_encoders，"
+                        "或改用 Local GGUF / Online LLM。"
+                    )
+                print(
+                    f"[Qwen Image 2.1 PE] 载入 {task} 编码器：{encoder}"
+                    "（两个 PE 编码器各 8.8GB，本节点全程只驻留其中一个）"
                 )
-            raw = _run_native_clip(
-                clip,
-                prompt,
-                images,
-                profile,
-                system_prompt,
-                {
-                    "max_length": max_tokens,
-                    "temperature": temperature,
-                    "top_p": top_p,
-                    "top_k": top_k,
-                    "min_p": profile["min_p"],
-                    "presence_penalty": presence_penalty,
-                    "seed": seed,
-                },
-            )
+                clip = _load_encoder(encoder)
+            else:
+                clip = inputs.get("clip")
+                if clip is None:
+                    raise ValueError(
+                        "模型来源选了 Local safetensors (CLIP)，但没有连接 clip。"
+                        "请用 CLIPLoader 加载 PE 编码器后接到本节点的 clip 输入，"
+                        "或把模型来源改成 Local safetensors (auto) 让节点自己载入。"
+                    )
+            try:
+                raw = _run_native_clip(
+                    clip,
+                    prompt,
+                    images,
+                    profile,
+                    system_prompt,
+                    {
+                        "max_length": max_tokens,
+                        "temperature": temperature,
+                        "top_p": top_p,
+                        "top_k": top_k,
+                        "min_p": profile["min_p"],
+                        "presence_penalty": presence_penalty,
+                        "seed": seed,
+                    },
+                )
+            finally:
+                if source == SOURCE_AUTO and bool(inputs.get("Unload Model After Generation", True)):
+                    _release_encoder()
             thinking, answer = _split_thinking(raw)
             parsed = _parse_answer(answer, task)
             self._report(parsed)

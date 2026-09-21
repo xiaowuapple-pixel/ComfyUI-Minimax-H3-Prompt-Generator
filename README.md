@@ -73,9 +73,15 @@ GPU 卸载层数默认为 `-1`，表示全部放入显存；显存不足时可�
 
 | 来源 | 怎么用 |
 | --- | --- |
+| `Local safetensors (auto)` | 节点自己按任务载入对应的 PE 编码器（只驻留一个），在 `T2I Encoder` / `I2I Encoder` 里选好两个文件即可，不用接 CLIPLoader |
 | `Local safetensors (CLIP)` | 用 CLIPLoader 加载官方 PE 编码器（类型选 `qwen_image`），把输出接到本节点的 `clip` 输入。走 ComfyUI 原生推理，int8_convrot 可用 |
 | `Local GGUF` | 下面表格里的 GGUF 量化版，用节点内的语言/视觉模型下拉选择 |
 | `Online LLM` | OpenAI 兼容接口，例如按官方 `serve.sh` 起的 PE 服务 |
+
+`Task` 默认是 `Auto (by images)`：**连了图片就走 edit，没连图片就走 t2i**，节点按这个自动选权重和系统提示词。
+两个 PE 编码器各 8.8 GB，不可能同时放进 16GB 显卡，所以节点全程只驻留一个：
+只有在真正需要时才载入，切换任务时先释放另一个，`Unload Model After Generation` 打开时用完即放。
+释放只丢掉编码器自己的引用（实测 14.6 GB → 1.4 GB），**不会牵连你的扩散模型**。
 
 官方 PE 编码器（放到 `models/text_encoders/`）：
 
@@ -168,13 +174,20 @@ Qwen3.5-VL 9B) and turns a short request into the long prompt 2.1 expects.
 - Local GGUF and hosted LLM sources, sharing the same runtime as H3 Prompt
 - On a parse failure `Positive Prompt` falls back to the raw answer and `Parse OK` is false, so nothing is lost silently
 
-`Model Source` has three options; the first two run locally:
+`Model Source` has four options; the first three run locally:
 
 | Source | How |
 | --- | --- |
+| `Local safetensors (auto)` | The node loads the PE encoder for the task itself (only one resident at a time); pick both files under `T2I Encoder` / `I2I Encoder`, no CLIPLoader needed |
 | `Local safetensors (CLIP)` | Load the official PE encoder with CLIPLoader (type `qwen_image`) and wire its output into this node's `clip` input. Uses ComfyUI's own inference, so int8_convrot works |
 | `Local GGUF` | The GGUF quants below, picked from the in-node model dropdowns |
 | `Online LLM` | Any OpenAI-compatible endpoint, e.g. a PE server started with the official `serve.sh` |
+
+`Task` defaults to `Auto (by images)`: images connected means an edit request, no images means text-to-image,
+and the node picks the matching weights and system prompt by itself. The two PE encoders are 8.8 GB each and
+cannot both fit a 16 GB card, so only one is ever resident: it is loaded on first need, the other is released
+when the task switches, and `Unload Model After Generation` frees it after the run. That release only drops the
+encoder's own reference (measured 14.6 GB -> 1.4 GB) and never touches your diffusion model.
 
 Official PE encoders (put them in `models/text_encoders/`):
 
