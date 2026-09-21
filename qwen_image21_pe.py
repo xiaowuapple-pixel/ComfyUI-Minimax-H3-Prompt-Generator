@@ -1081,7 +1081,9 @@ class QwenImage21TextEncodeList:
 
     Reference images are resized and VAE-encoded once and reused for every
     prompt, and the empty latent is built from the first reference's size, which
-    is what the stock node does.
+    is what the stock node does. Ten sockets are declared and the frontend keeps
+    only "linked + one empty" visible, so a fresh node does not show a wall of
+    ports.
     """
 
     @classmethod
@@ -1089,10 +1091,10 @@ class QwenImage21TextEncodeList:
         optional = {
             "vae": ("VAE", {"tooltip": "接上才会把参考图编成 reference latents（改图流程需要）。"}),
         }
-        for index in range(1, 7):
+        for index in range(1, MAX_INPUT_IMAGES + 1):
             optional[f"image_{index}"] = (
                 "IMAGE",
-                {"tooltip": f"第 {index} 张参考图，按 image_1…image_6 的顺序排。"},
+                {"tooltip": f"参考图 {index}（最多 {MAX_INPUT_IMAGES} 张，连上一张才会出现下一张）。"},
             )
         return {
             "required": {
@@ -1139,7 +1141,7 @@ class QwenImage21TextEncodeList:
         negative_list = _as_text_list(negative_prompt)
         images = [
             optional[f"image_{index}"]
-            for index in range(1, 7)
+            for index in range(1, MAX_INPUT_IMAGES + 1)
             if optional.get(f"image_{index}") is not None
         ]
         vae = optional.get("vae")
