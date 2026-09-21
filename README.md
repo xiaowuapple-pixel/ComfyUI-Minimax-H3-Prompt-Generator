@@ -122,6 +122,11 @@ GPU 卸载层数默认为 `-1`，表示全部放入显存；显存不足时可�
 | **Qwen Image 2.1 PE Settings**（可选） | 采样参数：预设、temperature、top_p、top_k、presence_penalty、max_new_tokens。接到主节点的 `pe_settings`；**不接就用官方出厂值** |
 | **Qwen Image 2.1 Prompt Enhancer** | 只有每次运行才会变的东西：提示词、任务、种子、画幅、目标像素、缓存开关、输出条数，以及 1-10 张参考图 |
 
+另外还有一个通用小工具节点 **Release Text Encoder (VRAM)**：把它串在文本编码之后、采样器之前
+（`conditioning` 进、`conditioning` 出，另接同一路 `clip`），它会在条件已经算完之后把文本编码器
+从显存里放掉。条件是现成的，所以画面不受影响；释放的是你指定的那个编码器（以及本包自己缓存的 PE 编码器），
+**不会碰扩散模型、VAE 或其它任何已载入的模型**。实测一次释放 7.6GB → 14.6GB 可用显存。
+
 两个加载节点输出同一种 `PE Model`，**用哪个就接哪个**——这样每个模式只显示它需要的选择，
 不会出现"选了 A 还要面对 B 的空白控件"：
 
@@ -288,6 +293,12 @@ This is four nodes now, each owning one concern:
 | **Qwen Image 2.1 PE Loader (GGUF)** | The PE GGUF quants: `T2I GGUF` + `I2I GGUF` + `Vision Model` (mmproj) + `GPU Offload Layers`. Measured about 5x faster than the native int8 path |
 | **Qwen Image 2.1 PE Settings** (optional) | Sampling: preset, temperature, top_p, top_k, presence_penalty, max_new_tokens. Wire it into `pe_settings`; **leave it off to use the official settings** |
 | **Qwen Image 2.1 Prompt Enhancer** | Only what changes per run: prompt, task, seed, aspect ratio, target megapixels, cache toggle, prompt count, and 1-10 reference images |
+
+There is also a small general-purpose node, **Release Text Encoder (VRAM)**. Wire it between the text
+encode and the sampler (`conditioning` in, `conditioning` out, plus the same `clip`), and it drops the
+text encoder once the conditioning exists. The conditioning is already computed, so the image is
+unaffected, and only the encoder you named (plus this pack's own cached PE encoder) is touched --
+never the diffusion model, the VAE or anything else loaded. Measured: 7.6 GB -> 14.6 GB free.
 
 Both loaders output the same `PE Model` type, so you wire whichever one matches your case -- and each shows
 only the pickers it needs:

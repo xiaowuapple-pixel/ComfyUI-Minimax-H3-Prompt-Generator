@@ -16,6 +16,7 @@ from the weights they belong to.
 
 from __future__ import annotations
 
+import gc
 import json
 import inspect
 import hashlib
@@ -1055,6 +1056,76 @@ class QwenImage21PESettings:
                 "max_new_tokens": int(inputs.get("Max New Tokens", 0) or 0),
             },
         )
+
+
+class PromptEnhancerReleaseTextEncoder:
+    """Hand the text encoder's VRAM back before the image model needs it.
+
+    ComfyUI only evicts a model when something else asks for the memory, so on a
+    16 GB card a 9-10 GB text encoder sits there until the sampler's model needs
+    the room -- and then the next prompt has to load it all over again, mid-run.
+    Dropping it here, right after the conditioning exists, keeps the card clear
+    for the image model.
+
+    The conditioning is already computed, so the picture is unaffected, and only
+    the encoder named by `clip` (plus this pack's own PE encoder cache) is
+    touched -- the diffusion model, the VAE and anything else loaded stay where
+    they are. Put it between the text encode and the sampler.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "conditioning": (
+                    "CONDITIONING",
+                    {"tooltip": "原样透传。把它串在文本编码之后、采样器之前，释放才会发生在正确的时刻。"},
+                ),
+                "clip": (
+                    "CLIP",
+                    {"tooltip": "要释放的文本编码器，接 CLIPLoader 那一路（编码节点用的同一个）。"},
+                ),
+            },
+        }
+
+    RETURN_TYPES = ("CONDITIONING",)
+    RETURN_NAMES = ("conditioning",)
+    FUNCTION = "release"
+    CATEGORY = "Prompt Enhancer"
+    DESCRIPTION = "Free a text encoder from VRAM after the conditioning exists, so the image model gets the whole card."
+
+    def release(self, conditioning, clip):
+        import comfy.model_management as mm
+
+        device = mm.get_torch_device()
+        before = mm.get_free_memory(device)
+        freed = []
+
+        patcher = getattr(clip, "patcher", None)
+        if patcher is not None:
+            for index in range(len(mm.current_loaded_models) - 1, -1, -1):
+                loaded = mm.current_loaded_models[index]
+                if getattr(loaded, "model", None) is not patcher:
+                    continue
+                inner = getattr(getattr(loaded, "model", None), "model", None)
+                if loaded.model_unload():
+                    mm.current_loaded_models.pop(index)
+                    freed.append(type(inner).__name__)
+
+        # This pack's own PE encoder cache, when the safetensors path left one.
+        if _ENCODER_CACHE:
+            freed.append(f"{len(_ENCODER_CACHE)} 个 PE 编码器")
+            _release_encoder()
+
+        gc.collect()
+        mm.soft_empty_cache()
+        after = mm.get_free_memory(device)
+        print(
+            "[Prompt Enhancer] 释放文本编码器："
+            + (", ".join(freed) if freed else "当前没有已载入的文本编码器")
+            + f"；显存 {before / 1024 ** 3:.1f}GB → {after / 1024 ** 3:.1f}GB"
+        )
+        return (conditioning,)
 
 
 class QwenImage21PromptEnhancer:
