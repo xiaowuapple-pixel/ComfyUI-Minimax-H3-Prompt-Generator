@@ -58,9 +58,7 @@ MAX_INPUT_IMAGES = 10
 # PE models are for), so it gets the same int8/kv-cache handling as everything
 # else in the graph.
 SOURCE_GGUF = "Local GGUF"
-SOURCE_CLIP = "Local safetensors (CLIP)"
 SOURCE_AUTO = "Local safetensors (auto)"
-MODEL_SOURCES = [SOURCE_AUTO, SOURCE_GGUF, SOURCE_CLIP]
 
 TASK_AUTO = "Auto (by images)"
 
@@ -70,9 +68,9 @@ TASK_AUTO = "Auto (by images)"
 ASPECT_AUTO = "Auto (model decides)"
 ASPECT_OPTIONS = [ASPECT_AUTO, "1:1", "4:3", "3:2", "16:9", "21:9", "9:16", "3:4", "2:3"]
 
-# The enhancer consumes whatever the loader picked, so the weights, the clip
-# wiring and the sampling knobs each live on their own node instead of crowding
-# the one you actually run every time.
+# The enhancer consumes whatever the loader picked, so the weights and the
+# sampling knobs each live on their own node instead of crowding the one you
+# actually run every time.
 PE_MODEL_TYPE = "QWE_PE_MODEL"
 PE_SETTINGS_TYPE = "QWE_PE_SETTINGS"
 
@@ -384,7 +382,7 @@ def _build_llama_template(system_prompt, image_count):
 
 
 def _run_native_clip(clip, prompt, images, profile, system_prompt, sampling):
-    """Generate through ComfyUI's own text encoder (CLIPLoader -> this node)."""
+    """Generate through ComfyUI's own text encoder, with the official chat template."""
     import torch
 
     image_tensor = None
@@ -548,7 +546,6 @@ def _pe_bundle(source, **values):
         "context_length": DEFAULT_CONTEXT_LENGTH,
         "system_prompt_file": "",
         "unload": True,
-        "clip": None,
     }
     bundle.update(values)
     return bundle
@@ -557,9 +554,10 @@ def _pe_bundle(source, **values):
 class QwenImage21PELoaderSafetensors:
     """Official PE safetensors: the reference weights.
 
-    Two pickers, because the two tasks have their own checkpoint. Wiring a CLIP in
-    (via CLIPLoader, type `qwen_image`) overrides the pickers -- that is the same
-    weights, just loaded by ComfyUI instead of this node.
+    Two pickers, because the two tasks have their own checkpoint. The node loads
+    whichever one the task needs and releases it afterwards; measured, that ends
+    up identical to feeding a CLIPLoader in, only without keeping 8.8 GB parked in
+    VRAM between runs.
     """
 
     @classmethod
@@ -599,14 +597,6 @@ class QwenImage21PELoaderSafetensors:
                 ),
                 "Unload Model After Generation": ("BOOLEAN", {"default": True}),
             },
-            "optional": {
-                "clip": (
-                    "CLIP",
-                    {
-                        "tooltip": "可选。接上就用它，不再按文件名载入（要显式接线时才用）。",
-                    },
-                ),
-            },
         }
 
     RETURN_TYPES = (PE_MODEL_TYPE,)
@@ -616,10 +606,9 @@ class QwenImage21PELoaderSafetensors:
     DESCRIPTION = "Load the official Qwen-Image-2.1 PE encoders (text_encoders) for the enhancer node."
 
     def build(self, **inputs):
-        clip = inputs.get("clip")
         return (
             _pe_bundle(
-                SOURCE_CLIP if clip is not None else SOURCE_AUTO,
+                SOURCE_AUTO,
                 t2i_encoder=inputs.get("T2I Encoder", ""),
                 i2i_encoder=inputs.get("I2I Encoder", ""),
                 context_length=int(
@@ -627,7 +616,6 @@ class QwenImage21PELoaderSafetensors:
                 ),
                 system_prompt_file=inputs.get("System Prompt File", ""),
                 unload=bool(inputs.get("Unload Model After Generation", True)),
-                clip=clip,
             ),
         )
 
@@ -894,7 +882,7 @@ class QwenImage21PromptEnhancer:
         else:
             model_prompt = prompt
         source = model.get("source", SOURCE_AUTO)
-        if source in (SOURCE_CLIP, SOURCE_AUTO):
+        if source == SOURCE_AUTO:
             # ComfyUI grows the KV cache with the request, so there is no fixed
             # window to trim against here.
             max_tokens = requested
@@ -908,7 +896,9 @@ class QwenImage21PromptEnhancer:
 
         cache_key = None
         if bool(inputs.get("Use Cache", True)):
-            model_hint = model.get("language_model", "") if source == SOURCE_GGUF else "clip"
+            model_hint = model.get("language_model", "") if source == SOURCE_GGUF else (
+                model.get("t2i_encoder") or model.get("i2i_encoder") or ""
+            )
             cache_key = _cache_key(
                 task,
                 prompt,
@@ -956,27 +946,18 @@ class QwenImage21PromptEnhancer:
             {"role": "user", "content": content},
         ]
 
-        if source in (SOURCE_CLIP, SOURCE_AUTO):
-            if source == SOURCE_AUTO:
-                encoder = model.get("t2i_encoder" if task == "t2i" else "i2i_encoder", "")
-                if not encoder or encoder == "No text encoders found":
-                    raise ValueError(
-                        "没有可用的文本编码器。请把官方 PE 权重放进 models/text_encoders，"
-                        "或在加载节点里改用 Local GGUF。"
-                    )
-                print(
-                    f"[Qwen Image 2.1 PE] 载入 {task} 编码器：{encoder}"
-                    "（两个 PE 编码器各 8.8GB，本节点全程只驻留其中一个）"
+        if source == SOURCE_AUTO:
+            encoder = model.get("t2i_encoder" if task == "t2i" else "i2i_encoder", "")
+            if not encoder or encoder == "No text encoders found":
+                raise ValueError(
+                    "没有可用的文本编码器。请把官方 PE 权重放进 models/text_encoders，"
+                    "或改用 Qwen Image 2.1 PE Loader (GGUF)。"
                 )
-                clip = _load_encoder(encoder)
-            else:
-                clip = model.get("clip")
-                if clip is None:
-                    raise ValueError(
-                        "加载节点选了 Local safetensors (CLIP)，但没有连接 clip。"
-                        "请用 CLIPLoader 加载 PE 编码器后接到加载节点的 clip 输入，"
-                        "或把那边改成 Local safetensors (auto) 让它自己载入。"
-                    )
+            print(
+                f"[Qwen Image 2.1 PE] 载入 {task} 编码器：{encoder}"
+                "（两个 PE 编码器各 8.8GB，本节点全程只驻留其中一个）"
+            )
+            clip = _load_encoder(encoder)
             try:
                 raw = _run_native_clip(
                     clip,
