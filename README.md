@@ -1,4 +1,46 @@
-# H3 Prompt
+# Prompt Enhancer
+
+一个 ComfyUI 提示词增强节点包，覆盖三条线：
+
+- **Qwen Image 2.1**：封装官方 `prompt_rewrite` 工具链（PE-T2I / PE-I2I），把简短需求扩写成 2.1 真正吃的长提示词
+- **MiniMax H3**：为 H3 生成可直接使用的视频提示词，支持参考图、参考视频、参考音频与官方创意 skills
+- **普通图像提示词**：根据原始需求和最多两张参考图，生成 SDXL / Illustrious / NoobAI 标签式提示词，或中英文自然语言提示词
+
+## 安装
+
+```bash
+cd ComfyUI/custom_nodes
+git clone https://github.com/xiaowuapple-pixel/ComfyUI-Prompt-Enhancer.git
+```
+
+或者在 ComfyUI-Manager 里用 `Install via Git URL` 粘贴同一个地址，然后重启 ComfyUI。
+
+依赖（在 ComfyUI 使用的 Python 环境里执行）：
+
+```bash
+pip install -r requirements.txt
+# 只有用本地 GGUF 推理时才需要，按你的 CUDA 版本选构建
+pip install -r requirements-local-gguf.txt
+```
+
+## 模型下载
+
+| 用途 | 文件 | 放哪里 | 下载 |
+| --- | --- | --- | --- |
+| H3 视频提示词 | `Qwen3.5-9B-Uncensored-HauhauCS-Aggressive-Q8_0.gguf`（或 Q6_K）+ `mmproj-Qwen3.5-9B-Uncensored-HauhauCS-Aggressive-BF16.gguf` | `models/LLM/` | [HauhauCS/Qwen3.5-9B-Uncensored-HauhauCS-Aggressive](https://huggingface.co/HauhauCS/Qwen3.5-9B-Uncensored-HauhauCS-Aggressive) |
+| H3 视频提示词（备选） | `Qwen3.8-9B-Q6_K.gguf` / `Qwen3.8-9B-Q8_0.gguf` | `models/LLM/` | [empero-ai/Qwen3.8-9B-Distill-GGUF](https://huggingface.co/empero-ai/Qwen3.8-9B-Distill-GGUF) |
+| Qwen Image 2.1 扩写（推荐） | `Qwen-Image-2.1-PE-T2I.Q5_K_M.gguf` | `models/LLM/` | [prithivMLmods/Qwen-Image-2.1-PE-T2I-GGUF](https://huggingface.co/prithivMLmods/Qwen-Image-2.1-PE-T2I-GGUF) |
+| Qwen Image 2.1 扩写（带图改写） | `Qwen-Image-2.1-PE-I2I.Q5_K_M.gguf` + `Qwen-Image-2.1-PE-I2I.mmproj-bf16.gguf` | `models/LLM/` | [prithivMLmods/Qwen-Image-2.1-PE-I2I-GGUF](https://huggingface.co/prithivMLmods/Qwen-Image-2.1-PE-I2I-GGUF) |
+| Qwen Image 2.1 扩写（官方权重） | `qwen3.5_9b_qwen_image_2.1_pe_t2i.int8_convrot.safetensors`、`..._pe_i2i...` | `models/text_encoders/` | [Comfy-Org/Qwen-Image-2.1](https://huggingface.co/Comfy-Org/Qwen-Image-2.1) |
+
+GGUF 走 llama.cpp，实测比 int8 safetensors 快约 5 倍，16GB 显存建议走 GGUF。
+模型也可以放在 `extra_model_paths.yaml` 注册的其它目录里，节点会一起扫描。
+
+## 范例工作流
+
+`example_workflows/Qwen-Image-2.1-TI2I.json` 是一份可直接拖进 ComfyUI 的完整文生图 / 改图工作流，
+里面已经接好 PE 加载节点与提示词增强节点（多张参考图 → 角色卡改写）。它还用到了这些第三方节点包，
+没装的节点会显示成红色：ComfyUI-LayerStyle、rgthree-comfy、ComfyUI-Crystools、ComfyUI-Easy-Use。
 
 ## 中文说明
 
@@ -354,11 +396,37 @@ system prompts, so `Parse OK` will be false on most runs.
 
 ### Installation
 
-Place this folder under `ComfyUI/custom_nodes/` and restart ComfyUI. Install the base dependencies
-from `requirements.txt`. For local GGUF inference, additionally install the optional dependencies
-from `requirements-local-gguf.txt` using a build compatible with your CUDA/GPU. Online API mode does
-not require `llama-cpp-python`.
+```bash
+cd ComfyUI/custom_nodes
+git clone https://github.com/xiaowuapple-pixel/ComfyUI-Prompt-Enhancer.git
+```
+
+Or install it from ComfyUI-Manager with `Install via Git URL` and the same address, then restart
+ComfyUI. Install the base dependencies from `requirements.txt`. For local GGUF inference, additionally
+install the optional dependencies from `requirements-local-gguf.txt` using a build compatible with
+your CUDA/GPU. Online API mode does not require `llama-cpp-python`.
 With no image connected and generation type set to Auto, the node automatically uses text-to-video.
+
+### Models
+
+| Use | Files | Where | Download |
+| --- | --- | --- | --- |
+| H3 video prompts | `Qwen3.5-9B-Uncensored-HauhauCS-Aggressive-Q8_0.gguf` (or Q6_K) + `mmproj-Qwen3.5-9B-Uncensored-HauhauCS-Aggressive-BF16.gguf` | `models/LLM/` | [HauhauCS/Qwen3.5-9B-Uncensored-HauhauCS-Aggressive](https://huggingface.co/HauhauCS/Qwen3.5-9B-Uncensored-HauhauCS-Aggressive) |
+| H3 video prompts (alternative) | `Qwen3.8-9B-Q6_K.gguf` / `Qwen3.8-9B-Q8_0.gguf` | `models/LLM/` | [empero-ai/Qwen3.8-9B-Distill-GGUF](https://huggingface.co/empero-ai/Qwen3.8-9B-Distill-GGUF) |
+| Qwen Image 2.1 expansion (recommended) | `Qwen-Image-2.1-PE-T2I.Q5_K_M.gguf` | `models/LLM/` | [prithivMLmods/Qwen-Image-2.1-PE-T2I-GGUF](https://huggingface.co/prithivMLmods/Qwen-Image-2.1-PE-T2I-GGUF) |
+| Qwen Image 2.1 edit | `Qwen-Image-2.1-PE-I2I.Q5_K_M.gguf` + `Qwen-Image-2.1-PE-I2I.mmproj-bf16.gguf` | `models/LLM/` | [prithivMLmods/Qwen-Image-2.1-PE-I2I-GGUF](https://huggingface.co/prithivMLmods/Qwen-Image-2.1-PE-I2I-GGUF) |
+| Qwen Image 2.1 expansion (official weights) | `qwen3.5_9b_qwen_image_2.1_pe_t2i.int8_convrot.safetensors`, `..._pe_i2i...` | `models/text_encoders/` | [Comfy-Org/Qwen-Image-2.1](https://huggingface.co/Comfy-Org/Qwen-Image-2.1) |
+
+The GGUF path runs on llama.cpp and measured about 5x faster than the int8 safetensors path, so it is
+what a 16 GB card should use. Models placed in other directories registered by `extra_model_paths.yaml`
+are picked up too.
+
+### Example workflow
+
+`example_workflows/Qwen-Image-2.1-TI2I.json` is a complete text-to-image / edit workflow, already wired
+to the PE loaders and the prompt enhancer (several reference images feeding a character-card rewrite).
+It also uses these third-party packs, so their nodes show up red until you install them:
+ComfyUI-LayerStyle, rgthree-comfy, ComfyUI-Crystools and ComfyUI-Easy-Use.
 
 For online mode, the endpoint must support OpenAI multimodal messages. API keys are used only at
 runtime and are never written to disk.

@@ -1,7 +1,7 @@
 [project]
-name = "comfyui-qwen-h3-prompt"
+name = "comfyui-prompt-enhancer"
 version = "1.0.0"
-description = "Selectable GGUF and mmproj multi-image Chinese MiniMax H3 prompt writer for ComfyUI"
+description = "Prompt enhancer nodes for ComfyUI: Qwen Image 2.1 expansion, MiniMax H3 video prompts, and general image prompts"
 requires-python = ">=3.10"
 dependencies = ["Pillow", "numpy"]
 
@@ -10,5 +10,5 @@ local-gguf = ["llama-cpp-python>=0.3.46"]
 
 [tool.comfy]
 PublisherId = "local"
-DisplayName = "H3 Prompt"
+DisplayName = "Prompt Enhancer"
 Icon = ""

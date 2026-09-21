@@ -982,7 +982,7 @@ class H3SaveImage:
     RETURN_TYPES = ()
     FUNCTION = "save_images"
     OUTPUT_NODE = True
-    CATEGORY = "MiniMax H3/Output"
+    CATEGORY = "Prompt Enhancer/Output"
 
     @staticmethod
     def _safe_output_dir(folder):
@@ -1159,7 +1159,7 @@ class Qwen36MultiImageH3ChinesePrompt:
     RETURN_TYPES = ("STRING",)
     RETURN_NAMES = ("H3 Prompt",)
     FUNCTION = "生成"
-    CATEGORY = "MiniMax H3/Prompt"
+    CATEGORY = "Prompt Enhancer"
     DESCRIPTION = "Generate MiniMax H3 prompts with local GGUF or online vision-language models."
 
     def 生成(self, **inputs):
@@ -1428,7 +1428,7 @@ class H3ImagePromptGenerator:
     RETURN_NAMES = ("Image Prompts",)
     OUTPUT_IS_LIST = (True,)
     FUNCTION = "generate"
-    CATEGORY = "MiniMax H3/Prompt"
+    CATEGORY = "Prompt Enhancer"
 
     @classmethod
     def IS_CHANGED(cls, **inputs):

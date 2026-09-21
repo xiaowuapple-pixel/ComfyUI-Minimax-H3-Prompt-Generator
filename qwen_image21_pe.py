@@ -186,6 +186,20 @@ def _default_encoder(names, marker):
     return names[0] if names else "No text encoders found"
 
 
+def _default_vision_model(names):
+    """Prefer the mmproj that ships beside the PE checkpoints.
+
+    The list is alphabetical, which puts a general-purpose Qwen3.5 mmproj first.
+    That one works (it was measured reading the reference images correctly), but
+    the PE one belongs to these weights, so it is what a fresh node should pick.
+    """
+    for marker in ("pe-i2i", "pe_i2i", "image-2.1"):
+        for name in names:
+            if marker in name.lower():
+                return name
+    return names[0] if names else "No vision models found"
+
+
 _ENCODER_CACHE = {}
 
 
@@ -860,7 +874,7 @@ class QwenImage21PELoaderSafetensors:
     RETURN_TYPES = (PE_MODEL_TYPE,)
     RETURN_NAMES = ("PE Model",)
     FUNCTION = "build"
-    CATEGORY = "MiniMax H3/Prompt"
+    CATEGORY = "Prompt Enhancer"
     DESCRIPTION = "Load the official Qwen-Image-2.1 PE encoders (text_encoders) for the enhancer node."
 
     def build(self, **inputs):
@@ -907,6 +921,7 @@ class QwenImage21PELoaderGGUF:
                 "Vision Model": (
                     vision_models,
                     {
+                        "default": _default_vision_model(vision_models),
                         "tooltip": "配套 mmproj 视觉模型。PE-I2I 的官方 mmproj 或任意 "
                                    "Qwen3.5-9B 的 mmproj 都可以。",
                     },
@@ -964,7 +979,7 @@ class QwenImage21PELoaderGGUF:
     RETURN_TYPES = (PE_MODEL_TYPE,)
     RETURN_NAMES = ("PE Model",)
     FUNCTION = "build"
-    CATEGORY = "MiniMax H3/Prompt"
+    CATEGORY = "Prompt Enhancer"
     DESCRIPTION = "Load a Qwen-Image-2.1 PE checkpoint as GGUF (llama.cpp) for the enhancer node."
 
     def build(self, **inputs):
@@ -1026,7 +1041,7 @@ class QwenImage21PESettings:
     RETURN_TYPES = (PE_SETTINGS_TYPE,)
     RETURN_NAMES = ("PE Settings",)
     FUNCTION = "build"
-    CATEGORY = "MiniMax H3/Prompt"
+    CATEGORY = "Prompt Enhancer"
     DESCRIPTION = "Optional sampling overrides for the Qwen-Image-2.1 prompt enhancer."
 
     def build(self, **inputs):
@@ -1140,7 +1155,7 @@ class QwenImage21PromptEnhancer:
     # hold a single item, which behaves exactly like a scalar.
     OUTPUT_IS_LIST = (True, True, True, True, True, True)
     FUNCTION = "enhance"
-    CATEGORY = "MiniMax H3/Prompt"
+    CATEGORY = "Prompt Enhancer"
     DESCRIPTION = "Official Qwen-Image-2.1 prompt enhancer (PE-T2I / PE-I2I). Connect a PE loader for the weights."
 
     @classmethod
