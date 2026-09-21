@@ -515,6 +515,10 @@ DEFAULT_CONTEXT_LENGTH = 12288
 class _VisionRuntime:
     llm = None
     chat_handler = None
+    # What the resident model was loaded with. Without this, a second call with
+    # the same settings pays the whole load again (~2-4 s from the OS cache,
+    # much more on a cold read) for a model that is already in VRAM.
+    signature = None
 
     @classmethod
     def load(
@@ -561,7 +565,53 @@ class _VisionRuntime:
         except Exception:
             cls.close()
             raise
+        cls.signature = cls._signature(
+            model_relative_path, vision_relative_path, gpu_layers, n_ctx, enable_thinking
+        )
         return cls.llm
+
+    @staticmethod
+    def _signature(model_relative_path, vision_relative_path, gpu_layers, n_ctx, enable_thinking):
+        return (
+            str(model_relative_path),
+            str(vision_relative_path),
+            int(gpu_layers),
+            int(n_ctx),
+            bool(enable_thinking),
+        )
+
+    @classmethod
+    def ensure(
+        cls,
+        model_relative_path,
+        vision_relative_path,
+        gpu_layers,
+        context_length=DEFAULT_CONTEXT_LENGTH,
+        enable_thinking=False,
+    ):
+        """Load only when the resident model cannot serve this request.
+
+        Every queue re-executes the node from scratch, so the default behaviour
+        of reloading is a fixed tax on each run -- and a multi-prompt batch asked
+        for the same weights N times over. Reusing the resident runtime removes
+        that tax without changing what is loaded.
+        """
+        try:
+            n_ctx = max(512, int(context_length))
+        except (TypeError, ValueError):
+            n_ctx = DEFAULT_CONTEXT_LENGTH
+        signature = cls._signature(
+            model_relative_path, vision_relative_path, gpu_layers, n_ctx, enable_thinking
+        )
+        if cls.llm is not None and cls.signature == signature:
+            return cls.llm
+        return cls.load(
+            model_relative_path,
+            vision_relative_path,
+            gpu_layers,
+            n_ctx,
+            enable_thinking,
+        )
 
     @classmethod
     def close(cls):
@@ -577,6 +627,7 @@ class _VisionRuntime:
                 pass
         cls.llm = None
         cls.chat_handler = None
+        cls.signature = None
         gc.collect()
         mm.soft_empty_cache()
 

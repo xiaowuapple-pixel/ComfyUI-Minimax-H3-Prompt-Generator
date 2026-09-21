@@ -23,6 +23,7 @@ import math
 import os
 import random
 import re
+import time
 
 import numpy as np
 
@@ -33,7 +34,6 @@ from .nodes import (
     _completion_budget,
     _input_value,
     _language_models,
-    _stream_completion,
     _tensor_to_data_url,
     _vision_models,
 )
@@ -335,6 +335,122 @@ def _parse_answer(answer, task):
     return {"positive_prompt": answer, "wh_ratio": "", "ratio_follow": "", "parse_ok": False}
 
 
+def _answer_complete(text, thinking):
+    """True once the answer's top-level JSON object has closed.
+
+    Only the part after the thinking block is scanned, because the private plan
+    mentions JSON examples of its own and an early `{` in there would look like
+    the start of the answer.
+    """
+    marker = text.rfind("</think>")
+    if marker >= 0:
+        body = text[marker + len("</think>"):]
+    elif thinking:
+        # Inside the private plan: the answer has not started yet.
+        return False
+    else:
+        body = text
+    depth = 0
+    started = False
+    in_string = False
+    escaped = False
+    for char in body:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            if depth == 0:
+                started = True
+            depth += 1
+        elif char == "}" and depth:
+            depth -= 1
+            if depth == 0 and started:
+                return True
+    return False
+
+
+def _reset_runtime(llm):
+    """Return a resident runtime to a clean state before the next generation.
+
+    This llama-cpp-python build keeps the previous turn in the KV cache and its
+    multimodal handler only truncates that cache when the new prompt is shorter
+    than the history. Feed it an identical prompt and it finds a full match, so
+    nothing is re-evaluated and the model keeps writing where it left off -- an
+    answer that opens by closing the previous one's JSON. Plain `reset()` is not
+    enough either: it only zeroes the counter, and decoding position 0 into a
+    cache that still holds a prompt fails outright. Only a memory clear leaves
+    the state both layers agree on.
+    """
+    manager = getattr(llm, "_hybrid_cache_mgr", None)
+    if manager is not None:
+        try:
+            manager.clear()
+        except Exception:
+            pass
+    context = getattr(llm, "_ctx", None)
+    clear = getattr(context, "memory_clear", None) if context is not None else None
+    if callable(clear):
+        try:
+            clear(True)
+        except TypeError:
+            clear()
+    reset = getattr(llm, "reset", None)
+    if callable(reset):
+        reset()
+    try:
+        llm.n_tokens = 0
+    except Exception:
+        pass
+
+
+def _stream_answer(llm, messages, stage, thinking, **parameters):
+    """Stream a completion, stopping the moment the JSON answer is closed.
+
+    The official budgets are huge (16256 / 24000 new tokens) because these are
+    general-purpose tools. A prompt rewrite is a few hundred tokens of JSON, so
+    anything written after the closing brace is pure waiting -- and on a bad
+    input the ceiling alone is several minutes.
+    """
+    started = time.perf_counter()
+    pieces = []
+    tokens = 0
+    first = None
+    print(f"[Qwen Image 2.1 PE] 开始{stage}...")
+    _reset_runtime(llm)
+    stream = llm.create_chat_completion(messages=messages, stream=True, **parameters)
+    for chunk in stream:
+        delta = chunk.get("choices", [{}])[0].get("delta", {}).get("content")
+        if not delta:
+            continue
+        if first is None:
+            first = time.perf_counter() - started
+        pieces.append(delta)
+        tokens += 1
+        if _answer_complete("".join(pieces), thinking):
+            break
+    text = "".join(pieces)
+    elapsed = time.perf_counter() - started
+    decode = elapsed - (first or 0)
+    rate = tokens / decode if decode > 0 else 0.0
+    print(
+        f"[Qwen Image 2.1 PE] {stage}完成：预填充 {first or elapsed:.1f}s，"
+        f"生成 {tokens} tokens / {decode:.1f}s（{rate:.0f} tok/s），合计 {elapsed:.1f}s"
+    )
+    if not _answer_complete(text, thinking):
+        print(
+            "[Qwen Image 2.1 PE] 提示：到达上限时 JSON 还没闭合，本次回答可能被截断。"
+            "可以调大 Max New Tokens 或上下文长度。"
+        )
+    return text
+
+
 def _adapt_sampling(llm, sampling):
     """Fit the official sampling names to whatever this llama-cpp-python build takes.
 
@@ -358,7 +474,7 @@ def _adapt_sampling(llm, sampling):
     return adapted
 
 
-def _build_llama_template(system_prompt, image_count):
+def _build_llama_template(system_prompt, image_count, thinking=False):
     """Chat template that carries the official system prompt.
 
     ComfyUI renders this with `str.format`, so literal braces in the system
@@ -368,6 +484,12 @@ def _build_llama_template(system_prompt, image_count):
     The assistant turn opens the thinking block itself. The official models were
     trained with `<think>` pre-filled by the chat template, so leaving it out
     would quietly change the contract even though the text still looks fine.
+
+    With thinking off the template emits an empty block instead, mirroring what
+    llama.cpp's own Qwen3.5 handler does. Measured on a 4080 that is 7 s vs 19 s
+    for t2i and 8.5 s vs 54 s for edit, with the JSON contract intact -- the
+    answer is just written without the private plan. That is why "off" is the
+    default and the loader exposes the switch.
     """
     safe = system_prompt.replace("{", "{{").replace("}", "}}")
     vision = _VISION_BLOCK * max(0, int(image_count))
@@ -377,11 +499,11 @@ def _build_llama_template(system_prompt, image_count):
         "<|im_start|>user\n"
         f"{vision}{{}}<|im_end|>\n"
         "<|im_start|>assistant\n"
-        "<think>\n"
+        + ("<think>\n" if thinking else "<think>\n\n</think>\n\n")
     )
 
 
-def _run_native_clip(clip, prompt, images, profile, system_prompt, sampling):
+def _run_native_clip(clip, prompt, images, profile, system_prompt, sampling, thinking=False):
     """Generate through ComfyUI's own text encoder, with the official chat template."""
     import torch
 
@@ -396,7 +518,7 @@ def _run_native_clip(clip, prompt, images, profile, system_prompt, sampling):
             ) from exc
         image_count = int(image_tensor.shape[0])
 
-    template = _build_llama_template(system_prompt, image_count)
+    template = _build_llama_template(system_prompt, image_count, thinking)
     tokens = clip.tokenize(
         prompt,
         image=image_tensor,
@@ -544,6 +666,7 @@ def _pe_bundle(source, **values):
         "gpu_layers": -1,
         "context_length": DEFAULT_CONTEXT_LENGTH,
         "system_prompt_file": "",
+        "thinking": False,
         "unload": True,
     }
     bundle.update(values)
@@ -587,20 +710,25 @@ class QwenImage21PELoaderSafetensors:
                         "tooltip": "带图改写任务用的 PE 编码器（text_encoders 里选）。",
                     },
                 ),
-                "Context Length": (
-                    list(CONTEXT_LENGTH_OPTIONS),
-                    {
-                        "default": "32768",
-                        "tooltip": "模型上下文窗口。PE 模型带思考块、输出很长，"
-                                   "官方 t2i 允许 16256 个新 token，不要设得太小。",
-                    },
-                ),
                 "System Prompt File": (
                     "STRING",
                     {
                         "default": "",
                         "multiline": False,
                         "tooltip": "留空则使用随权重配套的官方系统提示词。只有换权重时才需要指定。",
+                    },
+                ),
+                "Thinking": (
+                    "BOOLEAN",
+                    {
+                        "default": False,
+                        "label_on": "Think",
+                        "label_off": "Direct",
+                        "tooltip": "默认关（Direct）：直接写答案，实测 t2i 约 7 秒、带图改写约 8 秒。"
+                                   "打开（Think）：模型先内部推理八步再写，官方出厂设置，"
+                                   "实测 t2i 约 19 秒、带图改写约 54 秒，那轮规划占掉绝大部分 token。"
+                                   "两种模式产出的 JSON 契约与提示词质量基本一致，"
+                                   "只有特别复杂的改写才值得打开。",
                     },
                 ),
                 "Unload Model After Generation": ("BOOLEAN", {"default": True}),
@@ -619,10 +747,8 @@ class QwenImage21PELoaderSafetensors:
                 SOURCE_AUTO,
                 t2i_model=inputs.get("T2I Encoder", ""),
                 i2i_model=inputs.get("I2I Encoder", ""),
-                context_length=int(
-                    inputs.get("Context Length", DEFAULT_CONTEXT_LENGTH) or DEFAULT_CONTEXT_LENGTH
-                ),
                 system_prompt_file=inputs.get("System Prompt File", ""),
+                thinking=bool(inputs.get("Thinking", False)),
                 unload=bool(inputs.get("Unload Model After Generation", True)),
             ),
         )
@@ -667,8 +793,10 @@ class QwenImage21PELoaderGGUF:
                 "Context Length": (
                     list(CONTEXT_LENGTH_OPTIONS),
                     {
-                        "default": "32768",
-                        "tooltip": "模型上下文窗口。PE 模型带思考块、输出很长，不要设得太小。",
+                        "default": "16384",
+                        "tooltip": "模型上下文窗口。默认 16384：关掉思考后一次回复只有几百 token，"
+                                   "这个窗口省下约 3GB 显存，也不会拖慢速度。"
+                                   "只有打开 Think、或者提示词里塞了很长的参考素材时才需要调大。",
                     },
                 ),
                 "System Prompt File": (
@@ -677,6 +805,19 @@ class QwenImage21PELoaderGGUF:
                         "default": "",
                         "multiline": False,
                         "tooltip": "留空则使用随权重配套的官方系统提示词。只有换权重时才需要指定。",
+                    },
+                ),
+                "Thinking": (
+                    "BOOLEAN",
+                    {
+                        "default": False,
+                        "label_on": "Think",
+                        "label_off": "Direct",
+                        "tooltip": "默认关（Direct）：直接写答案，实测 t2i 约 7 秒、带图改写约 8 秒。"
+                                   "打开（Think）：模型先内部推理八步再写，官方出厂设置，"
+                                   "实测 t2i 约 19 秒、带图改写约 54 秒（3948 个 token 里绝大部分是规划）。"
+                                   "两种模式产出的 JSON 契约与提示词质量基本一致，"
+                                   "只有特别复杂的改写才值得打开。",
                     },
                 ),
                 "Unload Model After Generation": ("BOOLEAN", {"default": True}),
@@ -701,6 +842,7 @@ class QwenImage21PELoaderGGUF:
                     inputs.get("Context Length", DEFAULT_CONTEXT_LENGTH) or DEFAULT_CONTEXT_LENGTH
                 ),
                 system_prompt_file=inputs.get("System Prompt File", ""),
+                thinking=bool(inputs.get("Thinking", False)),
                 unload=bool(inputs.get("Unload Model After Generation", True)),
             ),
         )
@@ -880,6 +1022,7 @@ class QwenImage21PromptEnhancer:
                 "权重、上下文和 clip 都在那个加载节点上选。"
             )
         settings = inputs.get("pe_settings") or {}
+        thinking = bool(model.get("thinking", False))
         prompt = (inputs.get("Prompt") or "").strip()
         if not prompt:
             raise ValueError("Prompt 不能为空。")
@@ -956,6 +1099,7 @@ class QwenImage21PromptEnhancer:
                     "presence_penalty": presence_penalty,
                     "seed": seed,
                     "aspect": forced_ratio,
+                    "thinking": thinking,
                 },
             )
             cached = _cache_read(cache_key)
@@ -1017,6 +1161,7 @@ class QwenImage21PromptEnhancer:
                         "presence_penalty": presence_penalty,
                         "seed": seed,
                     },
+                    thinking,
                 )
             finally:
                 # A multi-prompt batch keeps the model until the last variant.
@@ -1038,15 +1183,21 @@ class QwenImage21PromptEnhancer:
             )
         if not vision_name or vision_name == "No vision models found":
             raise FileNotFoundError("请在加载节点里选择配套的 mmproj 视觉模型。")
-        print(f"[Qwen Image 2.1 PE] 载入 {task} 模型：{model_name}")
-        llm = _VisionRuntime.load(
+        load_started = time.perf_counter()
+        resident = _VisionRuntime.llm is not None
+        # Trained with the thinking block, but measured 6x slower with it on for
+        # the edit task (54 s vs 8.5 s on a 4080): the plan is where almost all
+        # the tokens go. Reusing the resident runtime keeps repeat runs cheap.
+        llm = _VisionRuntime.ensure(
             model_name,
             vision_name,
             int(model.get("gpu_layers", -1)),
             context_length,
-            # Both PE models were trained with the thinking block and degrade
-            # without it, so it is always on here.
-            True,
+            thinking,
+        )
+        print(
+            f"[Qwen Image 2.1 PE] {task} 模型就绪：{model_name}"
+            f"（{'复用' if resident else '载入'} {time.perf_counter() - load_started:.1f}s）"
         )
         try:
             sampling = {
@@ -1061,10 +1212,11 @@ class QwenImage21PromptEnhancer:
             # The local llama-cpp-python build exposes llama.cpp's own names, so
             # map them before the call.
             sampling = _adapt_sampling(llm, sampling)
-            raw = _stream_completion(
+            raw = _stream_answer(
                 llm,
                 messages,
                 f"Qwen Image 2.1 {task} 提示词扩写",
+                thinking,
                 **sampling,
             )
         finally:

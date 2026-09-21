@@ -66,7 +66,7 @@ GPU 卸载层数默认为 `-1`，表示全部放入显存；显存不足时可�
 - 另外输出 `Width` / `Height` 两个整数：t2i 按模型选的画幅 + `Target Megapixels` 换算，edit 直接沿用参考图尺寸
 - `t2i` 只接受文字；`edit` 最多 10 张参考图（模型上限），按顺序用 `<image1>`… 引用，顺序不能乱
 - 图片端口是动态的：默认只显示 `Image 1`，连上以后才长出 `Image 2`，依次类推，最多 10 个
-- 思考块始终开启（官方要求），思考内容不会写进提示词
+- 思考块默认关闭（加载节点上的 `Thinking` 开关可以打开），思考内容始终不会写进提示词
 - 采样默认使用官方出厂值：`t2i` 的 `presence_penalty=1.5`，`edit` 为 `0`；切成 `Custom` 才能手改
 - 本地 GGUF 与在线 LLM 都支持，和 H3 Prompt 共用同一套运行时
 - 解析失败时 `Positive Prompt` 回退为原始回答文本，并输出 `Parse OK=false`，不会静默丢结果
@@ -131,23 +131,35 @@ GPU 卸载层数默认为 `-1`，表示全部放入显存；显存不足时可�
 - `qwen3.5_9b_qwen_image_2.1_pe_i2i.int8_convrot.safetensors` — 带图改写真
 
 来源：[Comfy-Org/Qwen-Image-2.1](https://huggingface.co/Comfy-Org/Qwen-Image-2.1)。每个 8.82 GB，16GB 显卡可以跑。
-实测 4080 上约 10 token/s，一次 t2i 扩写（含思考块）约 2 分钟。
+实测 4080 上约 14 token/s，一次 t2i 扩写（含思考块）约 2 分钟。
 
 ### 关于速度
 
-这两个 PE 模型是 9B 且**必须带思考块**，思考内容大约占输出的一半，所以单次扩写本身就是一两分钟的量级。
-另外这两个 checkpoint **没有 MTP 头**，所以投机解码也用不上（节点里的"auto"会退化成普通采样）。
+4080 16GB + Q5_K_M GGUF，一次扩写实测：
+
+| 模式 | 文生图 | 带图改写 |
+| --- | --- | --- |
+| `Direct`（关思考，默认） | 约 7 秒 | 约 8.5 秒 |
+| `Think`（官方出厂设置） | 约 19 秒 | 约 52 秒 |
+| 原生 int8 safetensors（开思考） | 约 2 分钟 | 更慢 |
+
+时间几乎全花在那轮思考上：带图改写开思考时一共 3948 个 token，真正的答案只有几百个。
+关掉思考后 JSON 契约和提示词质量都不受影响，所以默认关。这两个 checkpoint **没有 MTP 头**，
+投机解码用不上（节点里的"auto"会退化成普通采样）。
 
 能用的加速手段，按效果排序：
 
-1. **换 GGUF 路线**（效果最明显）。同机实测：ComfyUI 原生 int8_convrot 约 14 token/s，
-   而 llama.cpp 跑同级别 9B GGUF 约 39 token/s。把 `Local GGUF` 指向 PE 的 GGUF 量化版，
-   单次扩写大概能压到 40-60 秒。见上面 GGUF 表格。
-2. **开 `Use Cache`（默认开启）**。相同请求 + 相同种子会直接复用上次结果，第二次起是毫秒级。
+1. **`Thinking` 保持关（默认）**。带图改写 52 秒 → 8.5 秒，文生图 19 秒 → 7 秒。
+2. **反复调提示词时关掉 `Unload Model After Generation`**。节点会留着已载入的模型，
+   下一次运行连载入都省掉（实测 4.0 秒 → 0.0 秒）。跑完整出图工作流前记得再打开，
+   否则那 6 GB 会一直占着显存。
+3. **用 GGUF 路线**。同机实测：ComfyUI 原生 int8_convrot 约 14 token/s，
+   llama.cpp 跑同级别 9B GGUF 约 75 token/s。见上面 GGUF 表格。
+4. **开 `Use Cache`（默认开启）**。相同请求 + 相同种子会直接复用上次结果，第二次起是毫秒级。
    反复调图时这个开关能省掉绝大部分等待。缓存放在 `ComfyUI/user/qwen_image21_pe_cache/`，
    要强制重新生成就关掉它或清空这个目录。
-3. **换更大的显卡**。官方推荐把 bf16 权重用 `serve.sh` + vLLM 部署到 24-40GB 的卡上，
-   本节点不再内置在线调用，但那条路是"又快又对"的方向，16GB 卡上放不下。
+5. **不用管输出上限**。节点在答案的 JSON 闭合的那一刻就停止生成，
+   官方那两个巨大的上限（16256 / 24000 个新 token）不再意味着要等满。
 
 建议的本地模型（适配 16GB 显存，来源见下方链接）：
 
@@ -161,8 +173,8 @@ GPU 卸载层数默认为 `-1`，表示全部放入显存；显存不足时可�
 - 量化版：[Qwen-Image-2.1-PE-T2I-GGUF](https://huggingface.co/prithivMLmods/Qwen-Image-2.1-PE-T2I-GGUF)、[Qwen-Image-2.1-PE-I2I-GGUF](https://huggingface.co/prithivMLmods/Qwen-Image-2.1-PE-I2I-GGUF)
 - 官方权重：[Qwen/Qwen-Image-2.1-PE-T2I](https://huggingface.co/Qwen/Qwen-Image-2.1-PE-T2I)、[Qwen/Qwen-Image-2.1-PE-I2I](https://huggingface.co/Qwen/Qwen-Image-2.1-PE-I2I)（bf16 约 20 GB，16GB 显卡放不下）
 
-推荐设置：`Context Length` 用 `32768`（PE 输出很长，官方 t2i 允许 16256 个新 token），
-`GPU Offload Layers` 用 `-1`。把基座模型（例如普通的 Qwen3.5-9B）填进去也能跑，
+推荐设置：`Context Length` 用 `16384`，`GPU Offload Layers` 用 `-1`。
+把基座模型（例如普通的 Qwen3.5-9B）填进去也能跑，
 但它没按这套系统提示词训练过，`Parse OK` 基本会是 false。
 
 参考：[官方 prompt_rewrite 文档](https://github.com/QwenLM/Qwen-Image-2.1/tree/main/prompt_rewrite)
@@ -213,7 +225,7 @@ Qwen3.5-VL 9B) and turns a short request into the long prompt 2.1 expects.
 - `Width` / `Height` are pixels: t2i scales the model's ratio to `Target Megapixels`, edit reuses the source image's size
 - `t2i` takes text only; `edit` takes up to 10 reference images (the model's limit), referenced as `<image1>`... in connection order
 - Image sockets are dynamic: only `Image 1` shows at first, and connecting it reveals `Image 2`, up to ten
-- Thinking stays on (required by the official models) and never leaks into the prompt
+- Thinking is off by default (the loader's `Thinking` switch turns it back on) and never leaks into the prompt
 - Official per-task sampling by default (`presence_penalty` 1.5 for t2i, 0 for edit); switch to `Custom` to override
 - Local GGUF and hosted LLM sources, sharing the same runtime as H3 Prompt
 - On a parse failure `Positive Prompt` falls back to the raw answer and `Parse OK` is false, so nothing is lost silently
@@ -279,24 +291,36 @@ Official PE encoders (put them in `models/text_encoders/`):
 - `qwen3.5_9b_qwen_image_2.1_pe_i2i.int8_convrot.safetensors` for edit rewriting
 
 From [Comfy-Org/Qwen-Image-2.1](https://huggingface.co/Comfy-Org/Qwen-Image-2.1). Each is 8.82 GB and fits a 16 GB card.
-Measured on a 4080: about 10 tokens/s, so one t2i expansion including its thinking block takes roughly two minutes.
+Measured on a 4080: about 14 tokens/s, so one t2i expansion including its thinking block takes roughly two minutes.
 
 ### About speed
 
-These PE models are 9B and **must** emit a thinking block, which is about half of the output, so one expansion
-is inherently a one-to-two minute job. Neither checkpoint ships an MTP head either, so speculative decoding is
-not available (the node's "auto" quietly falls back to plain sampling).
+Measured on a 4080 (16 GB) with the Q5_K_M GGUF, one expansion:
+
+| Mode | t2i | edit (one image) |
+| --- | --- | --- |
+| `Direct` (thinking off, the default) | ~7 s | ~8.5 s |
+| `Think` (the official setting) | ~19 s | ~52 s |
+| Native int8 safetensors (thinking on) | ~2 min | slower still |
+
+The time is almost entirely the thinking block: with it on, an edit rewrite emitted 3948 tokens, of which the
+answer itself was a few hundred. The JSON contract and the prompt quality held up with it off in testing, which
+is why `Direct` is the default. Neither checkpoint ships an MTP head, so speculative decoding is not available
+(the node's "auto" quietly falls back to plain sampling).
 
 What actually helps, best first:
 
-1. **Use the GGUF path.** Measured on the same machine: ComfyUI's native int8_convrot runs at about 14 tokens/s,
-   while llama.cpp runs a comparable 9B GGUF at about 39 tokens/s. Point `Local GGUF` at a PE GGUF quant and one
-   expansion should drop to roughly 40-60 seconds.
-2. **Keep `Use Cache` on (default).** Same request plus same seed reuses the previous result, so repeat runs are
+1. **Leave `Thinking` off.** 52 s -> 8.5 s on the edit task, 19 s -> 7 s on t2i.
+2. **Turn `Unload Model After Generation` off while you iterate.** The node then keeps the runtime resident and
+   a second run skips the load entirely (measured: 4.0 s -> 0.0 s). Turn it back on before queueing a full image
+   workflow, or the 6 GB stays parked in VRAM.
+3. **Use the GGUF path.** ComfyUI's native int8_convrot runs at about 14 tokens/s; llama.cpp runs the same 9B
+   quant at about 75 tokens/s. Both numbers are from the same card.
+4. **Keep `Use Cache` on (default).** Same request plus same seed reuses the previous result, so repeat runs are
    instant. The cache lives in `ComfyUI/user/qwen_image21_pe_cache/`; disable it or clear that folder to force a
    fresh generation.
-3. **Use a hosted endpoint.** Serve the PE model with the official `serve.sh` + vLLM on a bigger GPU and call it
-   through `Online LLM`; typically 20-40 seconds.
+5. **Leave the output budget alone.** The node stops the moment the answer's JSON closes, so the enormous official
+   ceilings (16256 / 24000 new tokens) no longer cost anything.
 
 Suggested local models for a 16 GB card ([Qwen-Image-2.1-PE-T2I-GGUF](https://huggingface.co/prithivMLmods/Qwen-Image-2.1-PE-T2I-GGUF),
 [Qwen-Image-2.1-PE-I2I-GGUF](https://huggingface.co/prithivMLmods/Qwen-Image-2.1-PE-I2I-GGUF)):
@@ -308,8 +332,10 @@ Suggested local models for a 16 GB card ([Qwen-Image-2.1-PE-T2I-GGUF](https://hu
 | edit | `Qwen-Image-2.1-PE-I2I.Q5_K_M.gguf` + `Qwen-Image-2.1-PE-I2I.mmproj-bf16.gguf` | 6.02 + 0.86 GB |
 | edit (leaner) | `Qwen-Image-2.1-PE-I2I.Q4_K_M.gguf` + `Qwen-Image-2.1-PE-I2I.mmproj-bf16.gguf` | 5.24 + 0.86 GB |
 
-Use `Context Length` 32768 (PE answers are long; official t2i allows 16256 new tokens) and
-`GPU Offload Layers` -1. A stock base model will load too, but it was never trained against these
+Use `Context Length` 16384 and `GPU Offload Layers` -1. The default window used to be 32768; with the thinking
+block off a reply is only a few hundred tokens, and the smaller window frees about 3 GB of VRAM without costing
+any speed. Raise it only if you turn `Thinking` on or feed very long reference material.
+A stock base model will load too, but it was never trained against these
 system prompts, so `Parse OK` will be false on most runs.
 
 ### Installation
