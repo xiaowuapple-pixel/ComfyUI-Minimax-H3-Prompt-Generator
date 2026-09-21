@@ -94,6 +94,11 @@ GPU 卸载层数默认为 `-1`，表示全部放入显存；显存不足时可�
 | `Ratio Follow` | 不用接，edit 专用信息（形如 `<image1>`），表示输出沿用哪张参考图的画幅 |
 | `Parse OK` | 不用接。`false` 表示模型没吐出预期 JSON，此时 `Positive Prompt` 是原始回答文本，可以用来判断这次结果要不要用 |
 
+画幅有专门的 `Aspect Ratio` 选择：默认 `Auto (model decides)` 是官方行为（模型自己定，结果从 `WH Ratio` 读）。
+想固定就选一个比例，节点会做两件事：把这个画幅写进交给模型的请求（中英双语标注，
+避免 edit 任务的输出语言被带偏），并让 `Width` / `Height` 按它计算。这样提示词描述的构图和实际画布是一致的。
+如果模型的判断和你的设定不同，日志里会提示一句。
+
 官方 PE 编码器（放到 `models/text_encoders/`）：
 
 - `qwen3.5_9b_qwen_image_2.1_pe_t2i.int8_convrot.safetensors` — t2i 扩写
@@ -210,6 +215,11 @@ Where the outputs go:
 | `WH Ratio` | leave unconnected; it is the model's own record of the canvas (`16:9`). The core Resolution Selector expects labels with suffixes (`16:9 (Widescreen)`), so a direct link will not validate -- that is why Width/Height are computed for you |
 | `Ratio Follow` | leave unconnected; edit only, names the reference image whose framing the output keeps (`<image1>`) |
 | `Parse OK` | leave unconnected; `false` means the answer was not the expected JSON and Positive Prompt holds the raw text |
+
+`Aspect Ratio` controls the canvas: `Auto (model decides)` is the official behaviour (read the result from `WH Ratio`).
+Pick a ratio to fix it and the node does two things: it tells the model about it (bilingual marker, so an edit run's
+output language is not dragged along) and it makes `Width` / `Height` follow it. The description and the frame then
+agree, and the log notes it when the model's own choice differed.
 
 Official PE encoders (put them in `models/text_encoders/`):
 

@@ -64,6 +64,12 @@ MODEL_SOURCES = [SOURCE_GGUF, SOURCE_AUTO, SOURCE_CLIP, SOURCE_ONLINE]
 
 TASK_AUTO = "Auto (by images)"
 
+# The official contract lets the model choose the canvas; this lets you override
+# it. Forcing a ratio changes two things: the model is told about it (so the
+# composition it describes matches the frame) and the Width/Height outputs use it.
+ASPECT_AUTO = "Auto (model decides)"
+ASPECT_OPTIONS = [ASPECT_AUTO, "1:1", "4:3", "3:2", "16:9", "21:9", "9:16", "3:4", "2:3"]
+
 _VISION_BLOCK = "<|vision_start|><|image_pad|><|vision_end|>"
 
 # Sampling values are the production inference settings of each task, copied from
@@ -407,13 +413,15 @@ def _image_index(text):
     return int(match.group(1)) - 1 if match else -1
 
 
-def _resolve_canvas(parsed, images, megapixels, multiple=8):
+def _resolve_canvas(parsed, images, megapixels, multiple=8, forced_pair=None):
     """Pixel size for the render, so WH Ratio is usable without hand-copying.
 
     t2i: the model picked the ratio, the megapixel budget is yours.
     edit: `ratio_follow` names the source image whose framing the output keeps,
     so the answer is that image's own size -- rescaling it would defeat the point.
     """
+    if forced_pair:
+        return _canvas_from_pair(forced_pair, megapixels, multiple)
     pair = _ratio_to_pair(parsed.get("wh_ratio") or "")
     if parsed.get("parse_ok"):
         follow = (parsed.get("ratio_follow") or "").strip()
@@ -606,6 +614,15 @@ class QwenImage21PromptEnhancer:
                                    "t2i 用模型选的画幅比例；edit 直接沿用参考图的尺寸，不受这里影响。",
                     },
                 ),
+                "Aspect Ratio": (
+                    ASPECT_OPTIONS,
+                    {
+                        "default": ASPECT_AUTO,
+                        "tooltip": "默认让模型自己定画幅（官方行为）。想固定就选一个："
+                                   "节点会把这个画幅同时写进请求交给模型，并让 Width/Height 按它计算，"
+                                   "这样提示词描述的构图和实际画布是一致的。",
+                    },
+                ),
             },
             "optional": {
                 **{f"Image {index}": ("IMAGE",) for index in range(1, MAX_INPUT_IMAGES + 1)},
@@ -665,6 +682,16 @@ class QwenImage21PromptEnhancer:
         requested = int(inputs.get("Max New Tokens", 0) or 0) or profile["max_new_tokens"]
         system_prompt = _load_system_prompt(task, inputs.get("System Prompt File", ""))
         megapixels = float(inputs.get("Target Megapixels", 2.0) or 2.0)
+        forced_ratio = inputs.get("Aspect Ratio", ASPECT_AUTO)
+        forced_pair = None if forced_ratio == ASPECT_AUTO else _ratio_to_pair(forced_ratio)
+        if forced_pair:
+            # Bilingual on purpose: the edit task mirrors the request's language,
+            # and a single-language marker could flip it.
+            model_prompt = (
+                f"{prompt}\n\n(输出画幅 / output aspect ratio: {forced_ratio})"
+            )
+        else:
+            model_prompt = prompt
         source = inputs.get("Model Source", SOURCE_GGUF)
         if source in (SOURCE_CLIP, SOURCE_AUTO):
             # ComfyUI grows the KV cache with the request, so there is no fixed
@@ -698,6 +725,7 @@ class QwenImage21PromptEnhancer:
                     "top_k": top_k,
                     "presence_penalty": presence_penalty,
                     "seed": seed,
+                    "aspect": forced_ratio,
                 },
             )
             cached = _cache_read(cache_key)
@@ -706,10 +734,10 @@ class QwenImage21PromptEnhancer:
                     "[Qwen Image 2.1 PE] 命中缓存（相同请求 + 相同种子），跳过生成。"
                     "需要重新生成请关掉 Use Cache 或清空 user/qwen_image21_pe_cache。"
                 )
-                width, height = _resolve_canvas(cached, images, megapixels)
+                width, height = _resolve_canvas(cached, images, megapixels, forced_pair=forced_pair)
                 return (
                     cached.get("positive_prompt", ""),
-                    cached.get("wh_ratio", ""),
+                    forced_ratio if forced_pair else cached.get("wh_ratio", ""),
                     cached.get("ratio_follow", ""),
                     bool(cached.get("parse_ok", False)),
                     width,
@@ -724,7 +752,7 @@ class QwenImage21PromptEnhancer:
                     "image_url": {"url": _tensor_to_data_url(image, max_size=1024)},
                 }
             )
-        content.append({"type": "text", "text": prompt})
+        content.append({"type": "text", "text": model_prompt})
         messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": content},
@@ -754,7 +782,7 @@ class QwenImage21PromptEnhancer:
             try:
                 raw = _run_native_clip(
                     clip,
-                    prompt,
+                    model_prompt,
                     images,
                     profile,
                     system_prompt,
@@ -774,7 +802,9 @@ class QwenImage21PromptEnhancer:
             thinking, answer = _split_thinking(raw)
             parsed = _parse_answer(answer, task)
             self._report(parsed)
-            return self._store(parsed, cache_key, task, prompt, images, megapixels)
+            return self._store(
+                parsed, cache_key, task, prompt, images, megapixels, forced_ratio, forced_pair
+            )
 
         online = source == SOURCE_ONLINE
         if online:
@@ -829,14 +859,21 @@ class QwenImage21PromptEnhancer:
         thinking, answer = _split_thinking(raw)
         parsed = _parse_answer(answer, task)
         self._report(parsed)
-        return self._store(parsed, cache_key, task, prompt, images, megapixels)
+        return self._store(
+            parsed, cache_key, task, prompt, images, megapixels, forced_ratio, forced_pair
+        )
 
     @staticmethod
-    def _store(parsed, cache_key, task, prompt, images, megapixels):
-        width, height = _resolve_canvas(parsed, images, megapixels)
+    def _store(parsed, cache_key, task, prompt, images, megapixels, forced_ratio, forced_pair):
+        width, height = _resolve_canvas(parsed, images, megapixels, forced_pair=forced_pair)
+        if forced_pair and parsed.get("wh_ratio") and forced_ratio != parsed["wh_ratio"]:
+            print(
+                f"[Qwen Image 2.1 PE] 画幅按你的设定用 {forced_ratio}"
+                f"（模型自己写的是 {parsed['wh_ratio']}）。"
+            )
         result = (
             parsed["positive_prompt"],
-            parsed["wh_ratio"],
+            forced_ratio if forced_pair else parsed["wh_ratio"],
             parsed["ratio_follow"],
             parsed["parse_ok"],
             width,
