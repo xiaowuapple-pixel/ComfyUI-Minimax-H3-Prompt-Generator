@@ -538,9 +538,8 @@ def _pe_bundle(source, **values):
     """One shape for every loader, so the enhancer never asks where it came from."""
     bundle = {
         "source": source,
-        "t2i_encoder": "",
-        "i2i_encoder": "",
-        "language_model": "",
+        "t2i_model": "",
+        "i2i_model": "",
         "vision_model": "",
         "gpu_layers": -1,
         "context_length": DEFAULT_CONTEXT_LENGTH,
@@ -549,6 +548,15 @@ def _pe_bundle(source, **values):
     }
     bundle.update(values)
     return bundle
+
+
+def _task_model(bundle, task):
+    """The file this run should use: the two tasks have their own checkpoint.
+
+    Both loaders offer a T2I and an I2I picker, so the task decides which one is
+    loaded -- you never pick a model and a task separately and hope they match.
+    """
+    return bundle.get("t2i_model" if task == "t2i" else "i2i_model", "")
 
 
 class QwenImage21PELoaderSafetensors:
@@ -609,8 +617,8 @@ class QwenImage21PELoaderSafetensors:
         return (
             _pe_bundle(
                 SOURCE_AUTO,
-                t2i_encoder=inputs.get("T2I Encoder", ""),
-                i2i_encoder=inputs.get("I2I Encoder", ""),
+                t2i_model=inputs.get("T2I Encoder", ""),
+                i2i_model=inputs.get("I2I Encoder", ""),
                 context_length=int(
                     inputs.get("Context Length", DEFAULT_CONTEXT_LENGTH) or DEFAULT_CONTEXT_LENGTH
                 ),
@@ -634,9 +642,19 @@ class QwenImage21PELoaderGGUF:
         vision_models = _vision_models() or ["No vision models found"]
         return {
             "required": {
-                "Language Model": (
+                "T2I GGUF": (
                     models,
-                    {"tooltip": "PE 的 GGUF 量化版（列表只列 PE 检查点）。"},
+                    {
+                        "default": _default_encoder(models, "pe-t2i"),
+                        "tooltip": "文生图任务用的 PE-T2I GGUF（列表只列 PE 检查点）。",
+                    },
+                ),
+                "I2I GGUF": (
+                    models,
+                    {
+                        "default": _default_encoder(models, "pe-i2i"),
+                        "tooltip": "带图改写任务用的 PE-I2I GGUF。两个都选好，任务由主节点自动判断。",
+                    },
                 ),
                 "Vision Model": (
                     vision_models,
@@ -675,7 +693,8 @@ class QwenImage21PELoaderGGUF:
         return (
             _pe_bundle(
                 SOURCE_GGUF,
-                language_model=inputs.get("Language Model", ""),
+                t2i_model=inputs.get("T2I GGUF", ""),
+                i2i_model=inputs.get("I2I GGUF", ""),
                 vision_model=inputs.get("Vision Model", ""),
                 gpu_layers=int(inputs.get("GPU Offload Layers", -1)),
                 context_length=int(
@@ -896,9 +915,7 @@ class QwenImage21PromptEnhancer:
 
         cache_key = None
         if bool(inputs.get("Use Cache", True)):
-            model_hint = model.get("language_model", "") if source == SOURCE_GGUF else (
-                model.get("t2i_encoder") or model.get("i2i_encoder") or ""
-            )
+            model_hint = _task_model(model, task)
             cache_key = _cache_key(
                 task,
                 prompt,
@@ -947,7 +964,7 @@ class QwenImage21PromptEnhancer:
         ]
 
         if source == SOURCE_AUTO:
-            encoder = model.get("t2i_encoder" if task == "t2i" else "i2i_encoder", "")
+            encoder = _task_model(model, task)
             if not encoder or encoder == "No text encoders found":
                 raise ValueError(
                     "没有可用的文本编码器。请把官方 PE 权重放进 models/text_encoders，"
@@ -985,10 +1002,16 @@ class QwenImage21PromptEnhancer:
                 parsed, cache_key, task, prompt, images, megapixels, forced_ratio, forced_pair
             )
 
-        model_name = model.get("language_model")
+        model_name = _task_model(model, task)
         vision_name = model.get("vision_model")
-        if model_name in {"No language models found", None} or vision_name in {"No vision models found", None}:
-            raise FileNotFoundError("请在加载节点里选择 PE 语言模型与配套的 mmproj 视觉模型。")
+        if not model_name or model_name == "No language models found":
+            raise FileNotFoundError(
+                f"加载节点里没有为 {task} 任务指定模型，请把 PE-"
+                f"{'T2I' if task == 't2i' else 'I2I'} 的 GGUF 选上。"
+            )
+        if not vision_name or vision_name == "No vision models found":
+            raise FileNotFoundError("请在加载节点里选择配套的 mmproj 视觉模型。")
+        print(f"[Qwen Image 2.1 PE] 载入 {task} 模型：{model_name}")
         llm = _VisionRuntime.load(
             model_name,
             vision_name,

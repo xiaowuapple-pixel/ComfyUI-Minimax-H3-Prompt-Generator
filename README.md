@@ -76,7 +76,7 @@ GPU 卸载层数默认为 `-1`，表示全部放入显存；显存不足时可�
 | 节点 | 负责什么 |
 | --- | --- |
 | **Qwen Image 2.1 PE Loader (safetensors)** | 官方 PE 权重（推荐）：`T2I Encoder` / `I2I Encoder` 两个选择，从 `text_encoders` 里读 |
-| **Qwen Image 2.1 PE Loader (GGUF)** | PE 的 GGUF 量化版：`Language Model` + `Vision Model`(mmproj) + `GPU Offload Layers`。实测比原生 int8 快约 5 倍 |
+| **Qwen Image 2.1 PE Loader (GGUF)** | PE 的 GGUF 量化版：`T2I GGUF` + `I2I GGUF` + `Vision Model`(mmproj) + `GPU Offload Layers`。实测比原生 int8 快约 5 倍 |
 | **Qwen Image 2.1 PE Settings**（可选） | 采样参数：预设、temperature、top_p、top_k、presence_penalty、max_new_tokens。接到主节点的 `pe_settings`；**不接就用官方出厂值** |
 | **Qwen Image 2.1 Prompt Enhancer** | 只有每次运行才会变的东西：提示词、任务、种子、画幅、目标像素、缓存开关，以及 1-10 张参考图 |
 
@@ -86,9 +86,11 @@ GPU 卸载层数默认为 `-1`，表示全部放入显存；显存不足时可�
 | 你的情况 | 用哪个加载节点 | 它上面有几个选择 |
 | --- | --- | --- |
 | 官方 safetensors（质量基准） | `PE Loader (safetensors)` | 两个：T2I、I2I |
-| 想要速度（GGUF 量化） | `PE Loader (GGUF)` | 两个：语言模型、mmproj |
+| 想要速度（GGUF 量化） | `PE Loader (GGUF)` | 三个：T2I、I2I、mmproj |
 
-> 两个加载节点都自己负责载入与释放：一次只驻留一个编码器，用完就还显存。
+> 两个加载节点都自己负责载入与释放：一次只驻留一个模型，用完就还显存。
+> 两个任务的选择只做一次（把 T2I 和 I2I 都选好），**由主节点按有没有连图自动决定用哪个**，
+> 不需要自己保证"任务和模型"配对。
 
 > 这个节点**只服务于 PE 权重**。在线 LLM 和普通 Qwen3.5 之类的通用模型已从节点里移除：
 > 它们能读到系统提示词、甚至能照结构输出，但没在这套答案契约上训练过，吐不出下游要的 JSON，
@@ -212,7 +214,7 @@ This is four nodes now, each owning one concern:
 | Node | Owns |
 | --- | --- |
 | **Qwen Image 2.1 PE Loader (safetensors)** | The official PE weights (recommended): two pickers, `T2I Encoder` / `I2I Encoder`, read from `text_encoders` |
-| **Qwen Image 2.1 PE Loader (GGUF)** | The PE GGUF quants: `Language Model` + `Vision Model` (mmproj) + `GPU Offload Layers`. Measured about 5x faster than the native int8 path |
+| **Qwen Image 2.1 PE Loader (GGUF)** | The PE GGUF quants: `T2I GGUF` + `I2I GGUF` + `Vision Model` (mmproj) + `GPU Offload Layers`. Measured about 5x faster than the native int8 path |
 | **Qwen Image 2.1 PE Settings** (optional) | Sampling: preset, temperature, top_p, top_k, presence_penalty, max_new_tokens. Wire it into `pe_settings`; **leave it off to use the official settings** |
 | **Qwen Image 2.1 Prompt Enhancer** | Only what changes per run: prompt, task, seed, aspect ratio, target megapixels, cache toggle, and 1-10 reference images |
 
@@ -222,9 +224,11 @@ only the pickers it needs:
 | Your case | Loader | Pickers on it |
 | --- | --- | --- |
 | Official safetensors (quality reference) | `PE Loader (safetensors)` | two: T2I, I2I |
-| Speed (GGUF quants) | `PE Loader (GGUF)` | two: language model, mmproj |
+| Speed (GGUF quants) | `PE Loader (GGUF)` | three: T2I, I2I, mmproj |
 
-> Both loaders own loading and unloading: one encoder resident at a time, released as soon as the run ends.
+> Both loaders own loading and unloading: one model resident at a time, released as soon as the run ends.
+> You pick both tasks once (T2I and I2I); the enhancer decides which one a run needs from whether images
+> are connected -- no need to keep "task and model" in sync by hand.
 
 > This node serves PE checkpoints only. The online-LLM path and plain Qwen3.5-style models were removed:
 > they read the system prompt and even mirror its structure, but they were never trained on its answer
