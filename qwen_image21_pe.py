@@ -28,7 +28,6 @@ from .nodes import (
     _VisionRuntime,
     _completion_budget,
     _input_value,
-    _is_online_source,
     _language_models,
     _stream_completion,
     _tensor_to_data_url,
@@ -47,6 +46,17 @@ except ImportError:
 PROMPT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pe_prompts")
 
 MAX_INPUT_IMAGES = 4
+
+# Which runtime turns the request into text. The local safetensors path uses
+# ComfyUI's own text-encoder inference (that is what the Comfy-Org repacks of the
+# PE models are for), so it gets the same int8/kv-cache handling as everything
+# else in the graph.
+SOURCE_GGUF = "Local GGUF"
+SOURCE_CLIP = "Local safetensors (CLIP)"
+SOURCE_ONLINE = "Online LLM"
+MODEL_SOURCES = [SOURCE_GGUF, SOURCE_CLIP, SOURCE_ONLINE]
+
+_VISION_BLOCK = "<|vision_start|><|image_pad|><|vision_end|>"
 
 # Sampling values are the production inference settings of each task, copied from
 # pe_core.py. They are not interchangeable: presence_penalty is 1.5 for t2i and
@@ -219,6 +229,69 @@ def _adapt_sampling(llm, sampling):
     return adapted
 
 
+def _build_llama_template(system_prompt, image_count):
+    """Chat template that carries the official system prompt.
+
+    ComfyUI renders this with `str.format`, so literal braces in the system
+    prompt (the official ones contain JSON examples) must be escaped before the
+    single `{}` placeholder for the user text.
+
+    The assistant turn opens the thinking block itself. The official models were
+    trained with `<think>` pre-filled by the chat template, so leaving it out
+    would quietly change the contract even though the text still looks fine.
+    """
+    safe = system_prompt.replace("{", "{{").replace("}", "}}")
+    vision = _VISION_BLOCK * max(0, int(image_count))
+    return (
+        "<|im_start|>system\n"
+        f"{safe}<|im_end|>\n"
+        "<|im_start|>user\n"
+        f"{vision}{{}}<|im_end|>\n"
+        "<|im_start|>assistant\n"
+        "<think>\n"
+    )
+
+
+def _run_native_clip(clip, prompt, images, profile, system_prompt, sampling):
+    """Generate through ComfyUI's own text encoder (CLIPLoader -> this node)."""
+    import torch
+
+    image_tensor = None
+    image_count = 0
+    if images:
+        try:
+            image_tensor = torch.cat([image.reshape(-1, *image.shape[-3:]) for image in images], dim=0)
+        except Exception as exc:  # mismatched sizes cannot share one batch
+            raise ValueError(
+                "edit 任务的输入图片尺寸必须一致（它们会被当作同一个批次送入模型）。"
+            ) from exc
+        image_count = int(image_tensor.shape[0])
+
+    template = _build_llama_template(system_prompt, image_count)
+    tokens = clip.tokenize(
+        prompt,
+        image=image_tensor,
+        llama_template=template,
+        thinking=True,
+    )
+    generated = clip.generate(
+        tokens,
+        do_sample=True,
+        max_length=sampling["max_length"],
+        temperature=sampling["temperature"],
+        top_k=sampling["top_k"],
+        top_p=sampling["top_p"],
+        min_p=sampling["min_p"],
+        repetition_penalty=1.0,
+        presence_penalty=sampling["presence_penalty"],
+        seed=sampling["seed"],
+        # "auto": uses the checkpoint's MTP head when it has one, plain sampling
+        # when it does not, which is what the official runners effectively do.
+        mtp=True,
+    )
+    return clip.decode(generated)
+
+
 class QwenImage21PromptEnhancer:
     """Expand a short request into a Qwen-Image-2.1 prompt with the official PE models."""
 
@@ -269,7 +342,16 @@ class QwenImage21PromptEnhancer:
                     },
                 ),
                 "Seed": ("INT", {"default": 42, "min": -1, "max": 0xFFFFFFFF, "step": 1}),
-                "Model Source": ("BOOLEAN", {"default": False, "label_on": "Online LLM", "label_off": "Local Model"}),
+                "Model Source": (
+                    MODEL_SOURCES,
+                    {
+                        "default": SOURCE_GGUF,
+                        "tooltip": "Local GGUF：本地 GGUF 权重（llama.cpp）。"
+                                   "Local safetensors (CLIP)：用 CLIPLoader 加载官方 PE safetensors 后接到本节点的 clip 输入，"
+                                   "走 ComfyUI 原生推理（int8_convrot 可用）。"
+                                   "Online LLM：OpenAI 兼容接口（vLLM 起的 PE 服务等）。",
+                    },
+                ),
                 "Language Model": (models,),
                 "Vision Model": (vision_models,),
                 "GPU Offload Layers": ("INT", {"default": -1, "min": -1, "max": 256, "step": 1}),
@@ -295,7 +377,16 @@ class QwenImage21PromptEnhancer:
                 ),
                 "Unload Model After Generation": ("BOOLEAN", {"default": True}),
             },
-            "optional": {f"Image {index}": ("IMAGE",) for index in range(1, MAX_INPUT_IMAGES + 1)},
+            "optional": {
+                **{f"Image {index}": ("IMAGE",) for index in range(1, MAX_INPUT_IMAGES + 1)},
+                "clip": (
+                    "CLIP",
+                    {
+                        "tooltip": "模型来源选 Local safetensors (CLIP) 时，把 CLIPLoader 加载的 "
+                                   "Qwen-Image-2.1 PE 编码器接到这里。",
+                    },
+                ),
+            },
         }
 
     RETURN_TYPES = ("STRING", "STRING", "STRING", "BOOLEAN")
@@ -340,13 +431,6 @@ class QwenImage21PromptEnhancer:
 
         context_length = int(inputs.get("Context Length", DEFAULT_CONTEXT_LENGTH) or DEFAULT_CONTEXT_LENGTH)
         requested = int(inputs.get("Max New Tokens", 0) or 0) or profile["max_new_tokens"]
-        max_tokens = _completion_budget(context_length, requested)
-        if max_tokens < requested:
-            print(
-                f"[Qwen Image 2.1 PE] 上下文 {context_length} 放不下官方 {requested} 个新 token，"
-                f"本次上限收敛为 {max_tokens}。需要更长输出请调大 Context Length。"
-            )
-
         system_prompt = _load_system_prompt(task, inputs.get("System Prompt File", ""))
         content = []
         for image in images:
@@ -362,7 +446,52 @@ class QwenImage21PromptEnhancer:
             {"role": "user", "content": content},
         ]
 
-        online = _is_online_source(inputs.get("Model Source", False))
+        source = inputs.get("Model Source", SOURCE_GGUF)
+        if source == SOURCE_CLIP:
+            # ComfyUI grows the KV cache with the request, so there is no fixed
+            # window to trim against here.
+            max_tokens = requested
+        else:
+            max_tokens = _completion_budget(context_length, requested)
+            if max_tokens < requested:
+                print(
+                    f"[Qwen Image 2.1 PE] 上下文 {context_length} 放不下官方 {requested} 个新 token，"
+                    f"本次上限收敛为 {max_tokens}。需要更长输出请调大 Context Length。"
+                )
+        if source == SOURCE_CLIP:
+            clip = inputs.get("clip")
+            if clip is None:
+                raise ValueError(
+                    "模型来源选了 Local safetensors (CLIP)，但没有连接 clip。"
+                    "请用 CLIPLoader 加载 PE 编码器后接到本节点的 clip 输入。"
+                )
+            raw = _run_native_clip(
+                clip,
+                prompt,
+                images,
+                profile,
+                system_prompt,
+                {
+                    "max_length": max_tokens,
+                    "temperature": temperature,
+                    "top_p": top_p,
+                    "top_k": top_k,
+                    "min_p": profile["min_p"],
+                    "presence_penalty": presence_penalty,
+                    "seed": seed,
+                },
+            )
+            thinking, answer = _split_thinking(raw)
+            parsed = _parse_answer(answer, task)
+            self._report(parsed)
+            return (
+                parsed["positive_prompt"],
+                parsed["wh_ratio"],
+                parsed["ratio_follow"],
+                parsed["parse_ok"],
+            )
+
+        online = source == SOURCE_ONLINE
         if online:
             key = (inputs.get("Online API Key") or "").strip()
             if not key:
@@ -414,6 +543,16 @@ class QwenImage21PromptEnhancer:
 
         thinking, answer = _split_thinking(raw)
         parsed = _parse_answer(answer, task)
+        self._report(parsed)
+        return (
+            parsed["positive_prompt"],
+            parsed["wh_ratio"],
+            parsed["ratio_follow"],
+            parsed["parse_ok"],
+        )
+
+    @staticmethod
+    def _report(parsed):
         if not parsed["parse_ok"]:
             print(
                 "[Qwen Image 2.1 PE] 警告：回答不是预期的 JSON，Positive Prompt 已回退为原始回答文本。"
@@ -421,10 +560,7 @@ class QwenImage21PromptEnhancer:
                 "系统提示词与权重不匹配、或输出被上下文长度截断。"
             )
         else:
-            print(f"[Qwen Image 2.1 PE] 解析成功，画布：{parsed['wh_ratio'] or parsed['ratio_follow'] or '未指定'}")
-        return (
-            parsed["positive_prompt"],
-            parsed["wh_ratio"],
-            parsed["ratio_follow"],
-            parsed["parse_ok"],
-        )
+            print(
+                f"[Qwen Image 2.1 PE] 解析成功，画布："
+                f"{parsed['wh_ratio'] or parsed['ratio_follow'] or '未指定'}"
+            )

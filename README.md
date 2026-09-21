@@ -69,6 +69,22 @@ GPU 卸载层数默认为 `-1`，表示全部放入显存；显存不足时可�
 - 本地 GGUF 与在线 LLM 都支持，和 H3 Prompt 共用同一套运行时
 - 解析失败时 `Positive Prompt` 回退为原始回答文本，并输出 `Parse OK=false`，不会静默丢结果
 
+`Model Source` 三选一，推荐前两种本地方式：
+
+| 来源 | 怎么用 |
+| --- | --- |
+| `Local safetensors (CLIP)` | 用 CLIPLoader 加载官方 PE 编码器（类型选 `qwen_image`），把输出接到本节点的 `clip` 输入。走 ComfyUI 原生推理，int8_convrot 可用 |
+| `Local GGUF` | 下面表格里的 GGUF 量化版，用节点内的语言/视觉模型下拉选择 |
+| `Online LLM` | OpenAI 兼容接口，例如按官方 `serve.sh` 起的 PE 服务 |
+
+官方 PE 编码器（放到 `models/text_encoders/`）：
+
+- `qwen3.5_9b_qwen_image_2.1_pe_t2i.int8_convrot.safetensors` — t2i 扩写
+- `qwen3.5_9b_qwen_image_2.1_pe_i2i.int8_convrot.safetensors` — 带图改写真
+
+来源：[Comfy-Org/Qwen-Image-2.1](https://huggingface.co/Comfy-Org/Qwen-Image-2.1)。每个 8.82 GB，16GB 显卡可以跑。
+实测 4080 上约 10 token/s，一次 t2i 扩写（含思考块）约 2 分钟。
+
 建议的本地模型（适配 16GB 显存，来源见下方链接）：
 
 | 用途 | 文件 | 大小 |
@@ -135,6 +151,22 @@ Qwen3.5-VL 9B) and turns a short request into the long prompt 2.1 expects.
 - Official per-task sampling by default (`presence_penalty` 1.5 for t2i, 0 for edit); switch to `Custom` to override
 - Local GGUF and hosted LLM sources, sharing the same runtime as H3 Prompt
 - On a parse failure `Positive Prompt` falls back to the raw answer and `Parse OK` is false, so nothing is lost silently
+
+`Model Source` has three options; the first two run locally:
+
+| Source | How |
+| --- | --- |
+| `Local safetensors (CLIP)` | Load the official PE encoder with CLIPLoader (type `qwen_image`) and wire its output into this node's `clip` input. Uses ComfyUI's own inference, so int8_convrot works |
+| `Local GGUF` | The GGUF quants below, picked from the in-node model dropdowns |
+| `Online LLM` | Any OpenAI-compatible endpoint, e.g. a PE server started with the official `serve.sh` |
+
+Official PE encoders (put them in `models/text_encoders/`):
+
+- `qwen3.5_9b_qwen_image_2.1_pe_t2i.int8_convrot.safetensors` for t2i expansion
+- `qwen3.5_9b_qwen_image_2.1_pe_i2i.int8_convrot.safetensors` for edit rewriting
+
+From [Comfy-Org/Qwen-Image-2.1](https://huggingface.co/Comfy-Org/Qwen-Image-2.1). Each is 8.82 GB and fits a 16 GB card.
+Measured on a 4080: about 10 tokens/s, so one t2i expansion including its thinking block takes roughly two minutes.
 
 Suggested local models for a 16 GB card ([Qwen-Image-2.1-PE-T2I-GGUF](https://huggingface.co/prithivMLmods/Qwen-Image-2.1-PE-T2I-GGUF),
 [Qwen-Image-2.1-PE-I2I-GGUF](https://huggingface.co/prithivMLmods/Qwen-Image-2.1-PE-I2I-GGUF)):
