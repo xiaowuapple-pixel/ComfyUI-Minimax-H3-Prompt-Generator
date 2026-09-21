@@ -1381,16 +1381,20 @@ class QwenImage21PromptEnhancer:
             if thinking and plan_tokens >= 0:
                 raw, truncated = _stream_plan(llm, messages, plan_tokens, **sampling)
                 if truncated and raw.strip():
-                    # Hand the half-written plan back as the assistant turn and
-                    # turn the generation prompt off, so the model continues from
-                    # inside the answer instead of opening a new turn.
+                    # Hand the half-written plan back as an example turn. The
+                    # handler has to be rebuilt for this: the template closes
+                    # every assistant turn with <|im_end|>, so the prefill is
+                    # only an example, and whether the model then answers or
+                    # plans again is decided by the generation prompt the
+                    # handler appends. With the think block open it plans again
+                    # (measured 6169 tokens); closed, it writes the answer.
                     messages = messages + [
                         {
                             "role": "assistant",
                             "content": raw.rstrip() + "\n</think>\n\n" + ANSWER_PREFILL,
                         }
                     ]
-                    sampling["add_generation_prompt"] = False
+                    _VisionRuntime.swap_thinking(False)
                     raw = _stream_answer(llm, messages, f"{stage}（写答案）", False, **sampling)
                     raw = _restore_prefill(raw)
             else:

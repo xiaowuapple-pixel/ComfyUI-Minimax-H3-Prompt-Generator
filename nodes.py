@@ -515,6 +515,10 @@ DEFAULT_CONTEXT_LENGTH = 12288
 class _VisionRuntime:
     llm = None
     chat_handler = None
+    # Which think setting the resident handler is built with. The prompt the
+    # handler renders decides whether the model plans or answers, and one run can
+    # need both (plan first, then write), so the handler is swappable.
+    handler_thinking = None
     # What the resident model was loaded with. Without this, a second call with
     # the same settings pays the whole load again (~2-4 s from the OS cache,
     # much more on a cold read) for a model that is already in VRAM.
@@ -565,10 +569,40 @@ class _VisionRuntime:
         except Exception:
             cls.close()
             raise
+        cls.handler_thinking = bool(enable_thinking)
         cls.signature = cls._signature(
             model_relative_path, vision_relative_path, gpu_layers, n_ctx, enable_thinking
         )
         return cls.llm
+
+    @classmethod
+    def swap_thinking(cls, enable_thinking):
+        """Rebuild the chat handler only, keeping the weights where they are.
+
+        The rendered prompt tells the model whether to plan or to answer: with
+        the think block left open it plans, with it closed it writes. A budgeted
+        run needs the first for the plan and the second for the answer, and
+        without this the second pass re-plans (measured 6169 tokens after an
+        800-token cut). Only the handler is rebuilt, so no weights reload.
+        """
+        if cls.llm is None or cls.signature is None:
+            return False
+        if cls.handler_thinking is not None and bool(cls.handler_thinking) == bool(enable_thinking):
+            return False
+        vision_path = _resolve_llm_path(cls.signature[1])
+        if vision_path is None:
+            return False
+        handler = _create_chat_handler(cls.signature[0], vision_path, bool(enable_thinking))
+        previous = cls.chat_handler
+        cls.chat_handler = handler
+        cls.handler_thinking = bool(enable_thinking)
+        cls.llm.chat_handler = handler
+        if previous is not None:
+            try:
+                previous._exit_stack.close()
+            except Exception:
+                pass
+        return True
 
     @staticmethod
     def _signature(model_relative_path, vision_relative_path, gpu_layers, n_ctx, enable_thinking):
@@ -604,6 +638,7 @@ class _VisionRuntime:
             model_relative_path, vision_relative_path, gpu_layers, n_ctx, enable_thinking
         )
         if cls.llm is not None and cls.signature == signature:
+            cls.swap_thinking(enable_thinking)
             return cls.llm
         return cls.load(
             model_relative_path,
@@ -627,6 +662,7 @@ class _VisionRuntime:
                 pass
         cls.llm = None
         cls.chat_handler = None
+        cls.handler_thinking = None
         cls.signature = None
         gc.collect()
         mm.soft_empty_cache()
