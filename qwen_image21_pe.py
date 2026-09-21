@@ -49,7 +49,9 @@ except ImportError:
 
 PROMPT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pe_prompts")
 
-MAX_INPUT_IMAGES = 4
+# Qwen-Image-2.1 accepts up to ten reference images. The frontend shows one empty
+# socket at a time and grows the list as you connect, so a fresh node stays small.
+MAX_INPUT_IMAGES = 10
 
 # Which runtime turns the request into text. The local safetensors path uses
 # ComfyUI's own text-encoder inference (that is what the Comfy-Org repacks of the

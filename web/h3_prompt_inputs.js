@@ -1,14 +1,22 @@
 import { app } from "../../scripts/app.js";
 
-// Keep the H3 Prompt node compact using real dynamic sockets (the same UX as
-// H3 Reference). Optional sockets are created one at a time after the prior
-// socket receives a link, so a newly-created node never shows a wall of ports.
+// Dynamic sockets for the prompt nodes: one empty slot at a time, growing only
+// when the previous one is linked, so a fresh node never shows a wall of ports.
+//   H3 Prompt      -- 9 images, 3 videos, 3 audio clips
+//   Qwen Image 2.1 Prompt Enhancer -- up to 10 reference images (the model's limit)
+const NODE_LIMITS = {
+  H3Prompt: { Image: 9, Video: 3, Audio: 3 },
+  QwenImage21PromptEnhancer: { Image: 10 },
+};
+
+const TYPE_BY_GROUP = { Image: "IMAGE", Video: "VIDEO", Audio: "AUDIO" };
+
 app.registerExtension({
   name: "minimax.h3.prompt.dynamic-media-inputs",
   nodeCreated(node) {
-    if (node.comfyClass !== "H3Prompt" && node.type !== "H3Prompt") return;
-    const limits = { Image: 9, Video: 3, Audio: 3 };
-    const typeFor = (group) => group === "Image" ? "IMAGE" : group.toUpperCase();
+    const limits = NODE_LIMITS[node.comfyClass] || NODE_LIMITS[node.type];
+    if (!limits) return;
+    const typeFor = (group) => TYPE_BY_GROUP[group] || group.toUpperCase();
     const refresh = () => {
       for (const [group, limit] of Object.entries(limits)) {
         let inputs = (node.inputs || []).filter((item) => item.name.startsWith(`${group} `));
