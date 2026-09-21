@@ -71,21 +71,25 @@ GPU 卸载层数默认为 `-1`，表示全部放入显存；显存不足时可�
 - 本地 GGUF 与在线 LLM 都支持，和 H3 Prompt 共用同一套运行时
 - 解析失败时 `Positive Prompt` 回退为原始回答文本，并输出 `Parse OK=false`，不会静默丢结果
 
-这套功能现在是三个节点，各管一件事：
+这套功能是四个节点，各管一件事：
 
 | 节点 | 负责什么 |
 | --- | --- |
-| **Qwen Image 2.1 PE Loader** | 权重相关：模型来源、两个 PE 编码器、GGUF 模型与 mmproj、GPU 卸载层数、上下文长度、系统提示词覆盖、生成后卸载，以及 `clip` 输入。输出接到主节点的 `pe_model` |
+| **Qwen Image 2.1 PE Loader (safetensors)** | 官方 PE 权重（推荐）：`T2I Encoder` / `I2I Encoder` 两个选择，从 `text_encoders` 里读。可选接 `clip`（CLIPLoader），接上就优先用它 |
+| **Qwen Image 2.1 PE Loader (GGUF)** | PE 的 GGUF 量化版：`Language Model` + `Vision Model`(mmproj) + `GPU Offload Layers`。实测比原生 int8 快约 5 倍 |
 | **Qwen Image 2.1 PE Settings**（可选） | 采样参数：预设、temperature、top_p、top_k、presence_penalty、max_new_tokens。接到主节点的 `pe_settings`；**不接就用官方出厂值** |
 | **Qwen Image 2.1 Prompt Enhancer** | 只有每次运行才会变的东西：提示词、任务、种子、画幅、目标像素、缓存开关，以及 1-10 张参考图 |
 
-加载节点里的 `Model Source` 三个选项，全部走本地：
+两个加载节点输出同一种 `PE Model`，**用哪个就接哪个**——这样每个模式只显示它需要的选择，
+不会出现"选了 A 还要面对 B 的空白控件"：
 
-| 来源 | 怎么用 |
-| --- | --- |
-| `Local safetensors (auto)` | 节点自己按任务载入对应的 PE 编码器（只驻留一个），在 `T2I Encoder` / `I2I Encoder` 里选好两个文件即可，不用接 CLIPLoader |
-| `Local safetensors (CLIP)` | 用 CLIPLoader 加载官方 PE 编码器（类型选 `qwen_image`），把输出接到本节点的 `clip` 输入。走 ComfyUI 原生推理，int8_convrot 可用 |
-| `Local GGUF` | 下面表格里的 GGUF 量化版，用节点内的语言/视觉模型下拉选择 |
+| 你的情况 | 用哪个加载节点 | 它上面有几个选择 |
+| --- | --- | --- |
+| 官方 safetensors（质量基准） | `PE Loader (safetensors)` | 两个：T2I、I2I |
+| 想要速度（GGUF 量化） | `PE Loader (GGUF)` | 两个：语言模型、mmproj |
+
+> `PE Loader (safetensors)` 不需要手动切模式：接了 `clip` 就用 CLIPLoader 的编码器，
+> 没接就按文件名自己载入（同一时间只驻留一个）。
 
 > 这个节点**只服务于 PE 权重**。在线 LLM 和普通 Qwen3.5 之类的通用模型已从节点里移除：
 > 它们能读到系统提示词、甚至能照结构输出，但没在这套答案契约上训练过，吐不出下游要的 JSON，
@@ -204,21 +208,25 @@ Qwen3.5-VL 9B) and turns a short request into the long prompt 2.1 expects.
 - Local GGUF and hosted LLM sources, sharing the same runtime as H3 Prompt
 - On a parse failure `Positive Prompt` falls back to the raw answer and `Parse OK` is false, so nothing is lost silently
 
-This is three nodes now, each owning one concern:
+This is four nodes now, each owning one concern:
 
 | Node | Owns |
 | --- | --- |
-| **Qwen Image 2.1 PE Loader** | Everything about the weights: source, both PE encoders, the GGUF model and mmproj, offload layers, context length, system-prompt override, unload-after-run, and the `clip` input. Wire its output into the enhancer's `pe_model` |
+| **Qwen Image 2.1 PE Loader (safetensors)** | The official PE weights (recommended): two pickers, `T2I Encoder` / `I2I Encoder`, read from `text_encoders`. An optional `clip` input wins when connected |
+| **Qwen Image 2.1 PE Loader (GGUF)** | The PE GGUF quants: `Language Model` + `Vision Model` (mmproj) + `GPU Offload Layers`. Measured about 5x faster than the native int8 path |
 | **Qwen Image 2.1 PE Settings** (optional) | Sampling: preset, temperature, top_p, top_k, presence_penalty, max_new_tokens. Wire it into `pe_settings`; **leave it off to use the official settings** |
 | **Qwen Image 2.1 Prompt Enhancer** | Only what changes per run: prompt, task, seed, aspect ratio, target megapixels, cache toggle, and 1-10 reference images |
 
-`Model Source` on the loader has three options, all local:
+Both loaders output the same `PE Model` type, so you wire whichever one matches your case -- and each shows
+only the pickers it needs:
 
-| Source | How |
-| --- | --- |
-| `Local safetensors (auto)` | The node loads the PE encoder for the task itself (only one resident at a time); pick both files under `T2I Encoder` / `I2I Encoder`, no CLIPLoader needed |
-| `Local safetensors (CLIP)` | Load the official PE encoder with CLIPLoader (type `qwen_image`) and wire its output into this node's `clip` input. Uses ComfyUI's own inference, so int8_convrot works |
-| `Local GGUF` | The GGUF quants below, picked from the in-node model dropdowns |
+| Your case | Loader | Pickers on it |
+| --- | --- | --- |
+| Official safetensors (quality reference) | `PE Loader (safetensors)` | two: T2I, I2I |
+| Speed (GGUF quants) | `PE Loader (GGUF)` | two: language model, mmproj |
+
+> `PE Loader (safetensors)` needs no mode switch: a connected `clip` wins, otherwise the node loads the
+> encoder by file name (one resident at a time).
 
 > This node serves PE checkpoints only. The online-LLM path and plain Qwen3.5-style models were removed:
 > they read the system prompt and even mirror its structure, but they were never trained on its answer

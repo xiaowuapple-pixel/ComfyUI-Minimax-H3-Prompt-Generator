@@ -149,9 +149,22 @@ def _pe_language_models():
     that costs minutes and returns a fallback. If no PE checkpoint is installed
     yet the full list is shown, so the node stays usable while you download one.
     """
-    models = _language_models()
-    pe = [name for name in models if "pe" in os.path.basename(name).lower()]
-    return pe or models
+    import folder_paths
+
+    models = list(_language_models())
+    try:
+        # Comfy-Org ships the PE checkpoints as text encoders, so a GGUF dropped
+        # next to them should be found too, not only the ones under models/LLM.
+        models += [
+            name
+            for name in folder_paths.get_filename_list("text_encoders")
+            if name.lower().endswith(".gguf")
+        ]
+    except Exception:
+        pass
+    unique = sorted(set(models))
+    pe = [name for name in unique if "pe" in os.path.basename(name).lower()]
+    return pe or unique
 
 
 def _default_encoder(names, marker):
@@ -523,48 +536,51 @@ def _cache_write(key, task, prompt, result):
         print(f"[Qwen Image 2.1 PE] 缓存写入失败（不影响本次结果）：{exc}")
 
 
-class QwenImage21PELoader:
-    """Choose the PE checkpoint set the enhancer will use.
+def _pe_bundle(source, **values):
+    """One shape for every loader, so the enhancer never asks where it came from."""
+    bundle = {
+        "source": source,
+        "t2i_encoder": "",
+        "i2i_encoder": "",
+        "language_model": "",
+        "vision_model": "",
+        "gpu_layers": -1,
+        "context_length": DEFAULT_CONTEXT_LENGTH,
+        "system_prompt_file": "",
+        "unload": True,
+        "clip": None,
+    }
+    bundle.update(values)
+    return bundle
 
-    Everything about *which* weights are used lives here: the source (official
-    safetensors loaded by the node, official safetensors via CLIPLoader, or a PE
-    GGUF), the matching mmproj, the offload/context settings, the system-prompt
-    override that has to travel with the weights, and the clip wiring.
+
+class QwenImage21PELoaderSafetensors:
+    """Official PE safetensors: the reference weights.
+
+    Two pickers, because the two tasks have their own checkpoint. Wiring a CLIP in
+    (via CLIPLoader, type `qwen_image`) overrides the pickers -- that is the same
+    weights, just loaded by ComfyUI instead of this node.
     """
 
     @classmethod
     def INPUT_TYPES(cls):
-        models = _pe_language_models() or ["No language models found"]
-        vision_models = _vision_models() or ["No vision models found"]
         encoders = _text_encoder_choices()
         return {
             "required": {
-                "Model Source": (
-                    MODEL_SOURCES,
-                    {
-                        "default": SOURCE_AUTO,
-                        "tooltip": "Local safetensors (auto)：节点自己按任务载入官方 PE 编码器，只驻留一个（推荐）。"
-                                   "Local GGUF：PE 权重的 GGUF 量化版，列表里只会出现 PE 检查点。"
-                                   "Local safetensors (CLIP)：用 CLIPLoader 加载官方 PE 编码器后接到本节点的 clip。",
-                    },
-                ),
                 "T2I Encoder": (
                     encoders,
                     {
                         "default": _default_encoder(encoders, "pe_t2i"),
-                        "tooltip": "Local safetensors (auto) 下，文生图任务用的 PE 编码器。",
+                        "tooltip": "文生图任务用的 PE 编码器（text_encoders 里选）。",
                     },
                 ),
                 "I2I Encoder": (
                     encoders,
                     {
                         "default": _default_encoder(encoders, "pe_i2i"),
-                        "tooltip": "Local safetensors (auto) 下，改图任务用的 PE 编码器。",
+                        "tooltip": "带图改写任务用的 PE 编码器（text_encoders 里选）。",
                     },
                 ),
-                "Language Model": (models,),
-                "Vision Model": (vision_models,),
-                "GPU Offload Layers": ("INT", {"default": -1, "min": -1, "max": 256, "step": 1}),
                 "Context Length": (
                     list(CONTEXT_LENGTH_OPTIONS),
                     {
@@ -587,8 +603,7 @@ class QwenImage21PELoader:
                 "clip": (
                     "CLIP",
                     {
-                        "tooltip": "Model Source 选 Local safetensors (CLIP) 时，"
-                                   "把 CLIPLoader 加载的 PE 编码器接到这里。",
+                        "tooltip": "可选。接上就用它，不再按文件名载入（要显式接线时才用）。",
                     },
                 ),
             },
@@ -598,24 +613,89 @@ class QwenImage21PELoader:
     RETURN_NAMES = ("PE Model",)
     FUNCTION = "build"
     CATEGORY = "MiniMax H3/Prompt"
-    DESCRIPTION = "Pick the Qwen-Image-2.1 prompt-enhancer weights (PE-T2I / PE-I2I) for the enhancer node."
+    DESCRIPTION = "Load the official Qwen-Image-2.1 PE encoders (text_encoders) for the enhancer node."
+
+    def build(self, **inputs):
+        clip = inputs.get("clip")
+        return (
+            _pe_bundle(
+                SOURCE_CLIP if clip is not None else SOURCE_AUTO,
+                t2i_encoder=inputs.get("T2I Encoder", ""),
+                i2i_encoder=inputs.get("I2I Encoder", ""),
+                context_length=int(
+                    inputs.get("Context Length", DEFAULT_CONTEXT_LENGTH) or DEFAULT_CONTEXT_LENGTH
+                ),
+                system_prompt_file=inputs.get("System Prompt File", ""),
+                unload=bool(inputs.get("Unload Model After Generation", True)),
+                clip=clip,
+            ),
+        )
+
+
+class QwenImage21PELoaderGGUF:
+    """PE weights as GGUF, run by llama.cpp.
+
+    Measured about five times faster than ComfyUI's int8 path on a 16 GB card, with
+    the same answer contract. Needs the matching mmproj because the loader is
+    built on the multimodal handler.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        models = _pe_language_models() or ["No language models found"]
+        vision_models = _vision_models() or ["No vision models found"]
+        return {
+            "required": {
+                "Language Model": (
+                    models,
+                    {"tooltip": "PE 的 GGUF 量化版（列表只列 PE 检查点）。"},
+                ),
+                "Vision Model": (
+                    vision_models,
+                    {
+                        "tooltip": "配套 mmproj 视觉模型。PE-I2I 的官方 mmproj 或任意 "
+                                   "Qwen3.5-9B 的 mmproj 都可以。",
+                    },
+                ),
+                "GPU Offload Layers": ("INT", {"default": -1, "min": -1, "max": 256, "step": 1}),
+                "Context Length": (
+                    list(CONTEXT_LENGTH_OPTIONS),
+                    {
+                        "default": "32768",
+                        "tooltip": "模型上下文窗口。PE 模型带思考块、输出很长，不要设得太小。",
+                    },
+                ),
+                "System Prompt File": (
+                    "STRING",
+                    {
+                        "default": "",
+                        "multiline": False,
+                        "tooltip": "留空则使用随权重配套的官方系统提示词。只有换权重时才需要指定。",
+                    },
+                ),
+                "Unload Model After Generation": ("BOOLEAN", {"default": True}),
+            },
+        }
+
+    RETURN_TYPES = (PE_MODEL_TYPE,)
+    RETURN_NAMES = ("PE Model",)
+    FUNCTION = "build"
+    CATEGORY = "MiniMax H3/Prompt"
+    DESCRIPTION = "Load a Qwen-Image-2.1 PE checkpoint as GGUF (llama.cpp) for the enhancer node."
 
     def build(self, **inputs):
         return (
-            {
-                "source": inputs.get("Model Source", SOURCE_AUTO),
-                "t2i_encoder": inputs.get("T2I Encoder", ""),
-                "i2i_encoder": inputs.get("I2I Encoder", ""),
-                "language_model": inputs.get("Language Model", ""),
-                "vision_model": inputs.get("Vision Model", ""),
-                "gpu_layers": int(inputs.get("GPU Offload Layers", -1)),
-                "context_length": int(
+            _pe_bundle(
+                SOURCE_GGUF,
+                language_model=inputs.get("Language Model", ""),
+                vision_model=inputs.get("Vision Model", ""),
+                gpu_layers=int(inputs.get("GPU Offload Layers", -1)),
+                context_length=int(
                     inputs.get("Context Length", DEFAULT_CONTEXT_LENGTH) or DEFAULT_CONTEXT_LENGTH
                 ),
-                "system_prompt_file": inputs.get("System Prompt File", ""),
-                "unload": bool(inputs.get("Unload Model After Generation", True)),
-                "clip": inputs.get("clip"),
-            },
+                system_prompt_file=inputs.get("System Prompt File", ""),
+                unload=bool(inputs.get("Unload Model After Generation", True)),
+            ),
         )
 
 
