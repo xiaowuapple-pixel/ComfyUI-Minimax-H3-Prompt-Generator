@@ -1,13 +1,21 @@
 from .nodes import NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS
-from .qwen_image21_pe import QwenImage21PromptEnhancer
+from .qwen_image21_pe import (
+    QwenImage21PELoader,
+    QwenImage21PESettings,
+    QwenImage21PromptEnhancer,
+)
 from . import api  # noqa: F401
 
 NODE_CLASS_MAPPINGS = {
     **NODE_CLASS_MAPPINGS,
+    "QwenImage21PELoader": QwenImage21PELoader,
+    "QwenImage21PESettings": QwenImage21PESettings,
     "QwenImage21PromptEnhancer": QwenImage21PromptEnhancer,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
     **NODE_DISPLAY_NAME_MAPPINGS,
+    "QwenImage21PELoader": "Qwen Image 2.1 PE Loader",
+    "QwenImage21PESettings": "Qwen Image 2.1 PE Settings",
     "QwenImage21PromptEnhancer": "Qwen Image 2.1 Prompt Enhancer",
 }
 

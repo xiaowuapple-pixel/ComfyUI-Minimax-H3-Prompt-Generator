@@ -70,6 +70,14 @@ TASK_AUTO = "Auto (by images)"
 ASPECT_AUTO = "Auto (model decides)"
 ASPECT_OPTIONS = [ASPECT_AUTO, "1:1", "4:3", "3:2", "16:9", "21:9", "9:16", "3:4", "2:3"]
 
+# The enhancer consumes whatever the loader picked, so the weights, the clip
+# wiring and the sampling knobs each live on their own node instead of crowding
+# the one you actually run every time.
+PE_MODEL_TYPE = "QWE_PE_MODEL"
+PE_SETTINGS_TYPE = "QWE_PE_SETTINGS"
+
+SAMPLING_PRESET_DEFAULT = "Official defaults"
+
 _VISION_BLOCK = "<|vision_start|><|image_pad|><|vision_end|>"
 
 # Sampling values are the production inference settings of each task, copied from
@@ -515,14 +523,163 @@ def _cache_write(key, task, prompt, result):
         print(f"[Qwen Image 2.1 PE] 缓存写入失败（不影响本次结果）：{exc}")
 
 
-class QwenImage21PromptEnhancer:
-    """Expand a short request into a Qwen-Image-2.1 prompt with the official PE models."""
+class QwenImage21PELoader:
+    """Choose the PE checkpoint set the enhancer will use.
+
+    Everything about *which* weights are used lives here: the source (official
+    safetensors loaded by the node, official safetensors via CLIPLoader, or a PE
+    GGUF), the matching mmproj, the offload/context settings, the system-prompt
+    override that has to travel with the weights, and the clip wiring.
+    """
 
     @classmethod
     def INPUT_TYPES(cls):
         models = _pe_language_models() or ["No language models found"]
         vision_models = _vision_models() or ["No vision models found"]
         encoders = _text_encoder_choices()
+        return {
+            "required": {
+                "Model Source": (
+                    MODEL_SOURCES,
+                    {
+                        "default": SOURCE_AUTO,
+                        "tooltip": "Local safetensors (auto)：节点自己按任务载入官方 PE 编码器，只驻留一个（推荐）。"
+                                   "Local GGUF：PE 权重的 GGUF 量化版，列表里只会出现 PE 检查点。"
+                                   "Local safetensors (CLIP)：用 CLIPLoader 加载官方 PE 编码器后接到本节点的 clip。",
+                    },
+                ),
+                "T2I Encoder": (
+                    encoders,
+                    {
+                        "default": _default_encoder(encoders, "pe_t2i"),
+                        "tooltip": "Local safetensors (auto) 下，文生图任务用的 PE 编码器。",
+                    },
+                ),
+                "I2I Encoder": (
+                    encoders,
+                    {
+                        "default": _default_encoder(encoders, "pe_i2i"),
+                        "tooltip": "Local safetensors (auto) 下，改图任务用的 PE 编码器。",
+                    },
+                ),
+                "Language Model": (models,),
+                "Vision Model": (vision_models,),
+                "GPU Offload Layers": ("INT", {"default": -1, "min": -1, "max": 256, "step": 1}),
+                "Context Length": (
+                    list(CONTEXT_LENGTH_OPTIONS),
+                    {
+                        "default": "32768",
+                        "tooltip": "模型上下文窗口。PE 模型带思考块、输出很长，"
+                                   "官方 t2i 允许 16256 个新 token，不要设得太小。",
+                    },
+                ),
+                "System Prompt File": (
+                    "STRING",
+                    {
+                        "default": "",
+                        "multiline": False,
+                        "tooltip": "留空则使用随权重配套的官方系统提示词。只有换权重时才需要指定。",
+                    },
+                ),
+                "Unload Model After Generation": ("BOOLEAN", {"default": True}),
+            },
+            "optional": {
+                "clip": (
+                    "CLIP",
+                    {
+                        "tooltip": "Model Source 选 Local safetensors (CLIP) 时，"
+                                   "把 CLIPLoader 加载的 PE 编码器接到这里。",
+                    },
+                ),
+            },
+        }
+
+    RETURN_TYPES = (PE_MODEL_TYPE,)
+    RETURN_NAMES = ("PE Model",)
+    FUNCTION = "build"
+    CATEGORY = "MiniMax H3/Prompt"
+    DESCRIPTION = "Pick the Qwen-Image-2.1 prompt-enhancer weights (PE-T2I / PE-I2I) for the enhancer node."
+
+    def build(self, **inputs):
+        return (
+            {
+                "source": inputs.get("Model Source", SOURCE_AUTO),
+                "t2i_encoder": inputs.get("T2I Encoder", ""),
+                "i2i_encoder": inputs.get("I2I Encoder", ""),
+                "language_model": inputs.get("Language Model", ""),
+                "vision_model": inputs.get("Vision Model", ""),
+                "gpu_layers": int(inputs.get("GPU Offload Layers", -1)),
+                "context_length": int(
+                    inputs.get("Context Length", DEFAULT_CONTEXT_LENGTH) or DEFAULT_CONTEXT_LENGTH
+                ),
+                "system_prompt_file": inputs.get("System Prompt File", ""),
+                "unload": bool(inputs.get("Unload Model After Generation", True)),
+                "clip": inputs.get("clip"),
+            },
+        )
+
+
+class QwenImage21PESettings:
+    """Sampling knobs, split out so the enhancer shows only what changes per run.
+
+    Leave it unconnected and every run uses the official per-task settings, which
+    is what you want unless you are deliberately experimenting.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "Sampling Preset": (
+                    [SAMPLING_PRESET_DEFAULT, "Custom"],
+                    {
+                        "default": SAMPLING_PRESET_DEFAULT,
+                        "tooltip": "官方默认使用各任务的出厂参数（t2i 的 presence_penalty=1.5，edit 为 0）。"
+                                   "选 Custom 才使用下面那些数值。",
+                    },
+                ),
+                "Temperature": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.01}),
+                "Top P": ("FLOAT", {"default": 0.95, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "Top K": ("INT", {"default": 20, "min": 0, "max": 200, "step": 1}),
+                "Presence Penalty": ("FLOAT", {"default": 1.5, "min": -2.0, "max": 2.0, "step": 0.05}),
+                "Max New Tokens": (
+                    "INT",
+                    {
+                        "default": 0,
+                        "min": 0,
+                        "max": 32768,
+                        "step": 256,
+                        "tooltip": "0 = 使用官方默认（t2i 16256 / edit 24000），"
+                                   "并受上下文长度限制自动收敛。",
+                    },
+                ),
+            },
+        }
+
+    RETURN_TYPES = (PE_SETTINGS_TYPE,)
+    RETURN_NAMES = ("PE Settings",)
+    FUNCTION = "build"
+    CATEGORY = "MiniMax H3/Prompt"
+    DESCRIPTION = "Optional sampling overrides for the Qwen-Image-2.1 prompt enhancer."
+
+    def build(self, **inputs):
+        return (
+            {
+                "preset": inputs.get("Sampling Preset", SAMPLING_PRESET_DEFAULT),
+                "temperature": float(inputs.get("Temperature", 1.0)),
+                "top_p": float(inputs.get("Top P", 0.95)),
+                "top_k": int(inputs.get("Top K", 20)),
+                "presence_penalty": float(inputs.get("Presence Penalty", 1.5)),
+                "max_new_tokens": int(inputs.get("Max New Tokens", 0) or 0),
+            },
+        )
+
+
+class QwenImage21PromptEnhancer:
+    """Expand a short request into a Qwen-Image-2.1 prompt with the official PE models."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
         return {
             "required": {
                 "Prompt": (
@@ -543,61 +700,7 @@ class QwenImage21PromptEnhancer:
                                    "两个任务用的是不同权重和不同系统提示词，不能互换。",
                     },
                 ),
-                "Sampling Preset": (
-                    ["Official defaults", "Custom"],
-                    {
-                        "default": "Official defaults",
-                        "tooltip": "官方默认使用各任务的出厂采样参数（t2i 的 presence_penalty=1.5，"
-                                   "edit 为 0）。选 Custom 才会使用下面那些数值。",
-                    },
-                ),
-                "Temperature": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.01}),
-                "Top P": ("FLOAT", {"default": 0.95, "min": 0.0, "max": 1.0, "step": 0.01}),
-                "Top K": ("INT", {"default": 20, "min": 0, "max": 200, "step": 1}),
-                "Presence Penalty": ("FLOAT", {"default": 1.5, "min": -2.0, "max": 2.0, "step": 0.05}),
-                "Max New Tokens": (
-                    "INT",
-                    {
-                        "default": 0,
-                        "min": 0,
-                        "max": 32768,
-                        "step": 256,
-                        "tooltip": "0 = 使用官方默认（t2i 16256 / edit 24000），"
-                                   "并受上下文长度限制自动收敛。",
-                    },
-                ),
                 "Seed": ("INT", {"default": 42, "min": -1, "max": 0xFFFFFFFF, "step": 1}),
-                "Model Source": (
-                    MODEL_SOURCES,
-                    {
-                        "default": SOURCE_GGUF,
-                        "tooltip": "Local safetensors (auto)：节点自己按任务载入官方 PE 编码器，只驻留一个（推荐）。"
-                                   "Local GGUF：PE 权重的 GGUF 量化版，用下面的下拉选择；"
-                                   "列表里只会出现 PE 检查点，普通 Qwen3.5 之类的模型不适用。"
-                                   "Local safetensors (CLIP)：用 CLIPLoader 加载官方 PE 编码器后接到 clip 输入。",
-                    },
-                ),
-                "Language Model": (models,),
-                "Vision Model": (vision_models,),
-                "GPU Offload Layers": ("INT", {"default": -1, "min": -1, "max": 256, "step": 1}),
-                "Context Length": (
-                    list(CONTEXT_LENGTH_OPTIONS),
-                    {
-                        "default": "32768",
-                        "tooltip": "模型上下文窗口。PE 模型带思考块，输出很长，"
-                                   "官方 t2i 允许 16256 个新 token，所以不要设得太小。",
-                    },
-                ),
-                "System Prompt File": (
-                    "STRING",
-                    {
-                        "default": "",
-                        "multiline": False,
-                        "tooltip": "留空则使用节点自带、随权重配套的官方系统提示词。"
-                                   "只有换权重时才需要指定。",
-                    },
-                ),
-                "Unload Model After Generation": ("BOOLEAN", {"default": True}),
                 "Use Cache": (
                     "BOOLEAN",
                     {
@@ -605,20 +708,6 @@ class QwenImage21PromptEnhancer:
                         "tooltip": "相同的请求 + 相同的种子会直接复用上次结果，跳过这次生成。"
                                    "一次扩写要一两分钟，反复调图时这个开关能省掉绝大部分等待。"
                                    "缓存目录：ComfyUI/user/qwen_image21_pe_cache。",
-                    },
-                ),
-                "T2I Encoder": (
-                    encoders,
-                    {
-                        "default": _default_encoder(encoders, "pe_t2i"),
-                        "tooltip": "模型来源选 Local safetensors (auto) 时，文生图任务用的 PE 编码器。",
-                    },
-                ),
-                "I2I Encoder": (
-                    encoders,
-                    {
-                        "default": _default_encoder(encoders, "pe_i2i"),
-                        "tooltip": "模型来源选 Local safetensors (auto) 时，改图任务用的 PE 编码器。",
                     },
                 ),
                 "Target Megapixels": (
@@ -643,14 +732,21 @@ class QwenImage21PromptEnhancer:
                 ),
             },
             "optional": {
-                **{f"Image {index}": ("IMAGE",) for index in range(1, MAX_INPUT_IMAGES + 1)},
-                "clip": (
-                    "CLIP",
+                "pe_model": (
+                    PE_MODEL_TYPE,
                     {
-                        "tooltip": "模型来源选 Local safetensors (CLIP) 时，把 CLIPLoader 加载的 "
-                                   "Qwen-Image-2.1 PE 编码器接到这里。",
+                        "tooltip": "连接 Qwen Image 2.1 PE Loader：用哪个权重、上下文、"
+                                   "卸载策略和 clip 都由那个节点决定。",
                     },
                 ),
+                "pe_settings": (
+                    PE_SETTINGS_TYPE,
+                    {
+                        "tooltip": "可选。连接 Qwen Image 2.1 PE Settings 才使用里面的采样参数；"
+                                   "不连则用官方出厂设置。",
+                    },
+                ),
+                **{f"Image {index}": ("IMAGE",) for index in range(1, MAX_INPUT_IMAGES + 1)},
             },
         }
 
@@ -658,9 +754,16 @@ class QwenImage21PromptEnhancer:
     RETURN_NAMES = ("Positive Prompt", "WH Ratio", "Ratio Follow", "Parse OK", "Width", "Height")
     FUNCTION = "enhance"
     CATEGORY = "MiniMax H3/Prompt"
-    DESCRIPTION = "Official Qwen-Image-2.1 prompt enhancer (PE-T2I / PE-I2I) for local GGUF or online LLMs."
+    DESCRIPTION = "Official Qwen-Image-2.1 prompt enhancer (PE-T2I / PE-I2I). Connect a PE loader for the weights."
 
     def enhance(self, **inputs):
+        model = inputs.get("pe_model")
+        if not model:
+            raise ValueError(
+                "请连接“Qwen Image 2.1 PE Loader”：本节点只负责扩写，"
+                "权重、上下文和 clip 都在那个加载节点上选。"
+            )
+        settings = inputs.get("pe_settings") or {}
         prompt = (inputs.get("Prompt") or "").strip()
         if not prompt:
             raise ValueError("Prompt 不能为空。")
@@ -685,20 +788,20 @@ class QwenImage21PromptEnhancer:
         if seed < 0:
             seed = random.SystemRandom().randint(0, 0xFFFFFFFF)
 
-        if inputs.get("Sampling Preset", "Official defaults") == "Official defaults":
+        if settings.get("preset", SAMPLING_PRESET_DEFAULT) == SAMPLING_PRESET_DEFAULT:
             temperature = profile["temperature"]
             top_p = profile["top_p"]
             top_k = profile["top_k"]
             presence_penalty = profile["presence_penalty"]
         else:
-            temperature = float(inputs.get("Temperature", profile["temperature"]))
-            top_p = float(inputs.get("Top P", profile["top_p"]))
-            top_k = int(inputs.get("Top K", profile["top_k"]))
-            presence_penalty = float(inputs.get("Presence Penalty", profile["presence_penalty"]))
+            temperature = float(settings.get("temperature", profile["temperature"]))
+            top_p = float(settings.get("top_p", profile["top_p"]))
+            top_k = int(settings.get("top_k", profile["top_k"]))
+            presence_penalty = float(settings.get("presence_penalty", profile["presence_penalty"]))
 
-        context_length = int(inputs.get("Context Length", DEFAULT_CONTEXT_LENGTH) or DEFAULT_CONTEXT_LENGTH)
-        requested = int(inputs.get("Max New Tokens", 0) or 0) or profile["max_new_tokens"]
-        system_prompt = _load_system_prompt(task, inputs.get("System Prompt File", ""))
+        context_length = int(model.get("context_length") or DEFAULT_CONTEXT_LENGTH)
+        requested = int(settings.get("max_new_tokens", 0) or 0) or profile["max_new_tokens"]
+        system_prompt = _load_system_prompt(task, model.get("system_prompt_file", ""))
         megapixels = float(inputs.get("Target Megapixels", 2.0) or 2.0)
         forced_ratio = inputs.get("Aspect Ratio", ASPECT_AUTO)
         forced_pair = None if forced_ratio == ASPECT_AUTO else _ratio_to_pair(forced_ratio)
@@ -710,7 +813,7 @@ class QwenImage21PromptEnhancer:
             )
         else:
             model_prompt = prompt
-        source = inputs.get("Model Source", SOURCE_GGUF)
+        source = model.get("source", SOURCE_AUTO)
         if source in (SOURCE_CLIP, SOURCE_AUTO):
             # ComfyUI grows the KV cache with the request, so there is no fixed
             # window to trim against here.
@@ -725,7 +828,7 @@ class QwenImage21PromptEnhancer:
 
         cache_key = None
         if bool(inputs.get("Use Cache", True)):
-            model_hint = inputs.get("Language Model", "") if source == SOURCE_GGUF else "clip"
+            model_hint = model.get("language_model", "") if source == SOURCE_GGUF else "clip"
             cache_key = _cache_key(
                 task,
                 prompt,
@@ -775,11 +878,11 @@ class QwenImage21PromptEnhancer:
 
         if source in (SOURCE_CLIP, SOURCE_AUTO):
             if source == SOURCE_AUTO:
-                encoder = inputs.get("T2I Encoder" if task == "t2i" else "I2I Encoder", "")
+                encoder = model.get("t2i_encoder" if task == "t2i" else "i2i_encoder", "")
                 if not encoder or encoder == "No text encoders found":
                     raise ValueError(
                         "没有可用的文本编码器。请把官方 PE 权重放进 models/text_encoders，"
-                        "或改用 Local GGUF / Online LLM。"
+                        "或在加载节点里改用 Local GGUF。"
                     )
                 print(
                     f"[Qwen Image 2.1 PE] 载入 {task} 编码器：{encoder}"
@@ -787,12 +890,12 @@ class QwenImage21PromptEnhancer:
                 )
                 clip = _load_encoder(encoder)
             else:
-                clip = inputs.get("clip")
+                clip = model.get("clip")
                 if clip is None:
                     raise ValueError(
-                        "模型来源选了 Local safetensors (CLIP)，但没有连接 clip。"
-                        "请用 CLIPLoader 加载 PE 编码器后接到本节点的 clip 输入，"
-                        "或把模型来源改成 Local safetensors (auto) 让节点自己载入。"
+                        "加载节点选了 Local safetensors (CLIP)，但没有连接 clip。"
+                        "请用 CLIPLoader 加载 PE 编码器后接到加载节点的 clip 输入，"
+                        "或把那边改成 Local safetensors (auto) 让它自己载入。"
                     )
             try:
                 raw = _run_native_clip(
@@ -812,7 +915,7 @@ class QwenImage21PromptEnhancer:
                     },
                 )
             finally:
-                if source == SOURCE_AUTO and bool(inputs.get("Unload Model After Generation", True)):
+                if source == SOURCE_AUTO and bool(model.get("unload", True)):
                     _release_encoder()
             thinking, answer = _split_thinking(raw)
             parsed = _parse_answer(answer, task)
@@ -821,14 +924,14 @@ class QwenImage21PromptEnhancer:
                 parsed, cache_key, task, prompt, images, megapixels, forced_ratio, forced_pair
             )
 
-        model_name = inputs.get("Language Model")
-        vision_name = inputs.get("Vision Model")
+        model_name = model.get("language_model")
+        vision_name = model.get("vision_model")
         if model_name in {"No language models found", None} or vision_name in {"No vision models found", None}:
-            raise FileNotFoundError("请先选择 PE 语言模型与配套的 mmproj 视觉模型。")
+            raise FileNotFoundError("请在加载节点里选择 PE 语言模型与配套的 mmproj 视觉模型。")
         llm = _VisionRuntime.load(
             model_name,
             vision_name,
-            inputs.get("GPU Offload Layers", -1),
+            int(model.get("gpu_layers", -1)),
             context_length,
             # Both PE models were trained with the thinking block and degrade
             # without it, so it is always on here.

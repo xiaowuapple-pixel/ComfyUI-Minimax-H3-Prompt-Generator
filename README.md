@@ -71,7 +71,15 @@ GPU 卸载层数默认为 `-1`，表示全部放入显存；显存不足时可�
 - 本地 GGUF 与在线 LLM 都支持，和 H3 Prompt 共用同一套运行时
 - 解析失败时 `Positive Prompt` 回退为原始回答文本，并输出 `Parse OK=false`，不会静默丢结果
 
-`Model Source` 三个选项，全部走本地：
+这套功能现在是三个节点，各管一件事：
+
+| 节点 | 负责什么 |
+| --- | --- |
+| **Qwen Image 2.1 PE Loader** | 权重相关：模型来源、两个 PE 编码器、GGUF 模型与 mmproj、GPU 卸载层数、上下文长度、系统提示词覆盖、生成后卸载，以及 `clip` 输入。输出接到主节点的 `pe_model` |
+| **Qwen Image 2.1 PE Settings**（可选） | 采样参数：预设、temperature、top_p、top_k、presence_penalty、max_new_tokens。接到主节点的 `pe_settings`；**不接就用官方出厂值** |
+| **Qwen Image 2.1 Prompt Enhancer** | 只有每次运行才会变的东西：提示词、任务、种子、画幅、目标像素、缓存开关，以及 1-10 张参考图 |
+
+加载节点里的 `Model Source` 三个选项，全部走本地：
 
 | 来源 | 怎么用 |
 | --- | --- |
@@ -196,7 +204,15 @@ Qwen3.5-VL 9B) and turns a short request into the long prompt 2.1 expects.
 - Local GGUF and hosted LLM sources, sharing the same runtime as H3 Prompt
 - On a parse failure `Positive Prompt` falls back to the raw answer and `Parse OK` is false, so nothing is lost silently
 
-`Model Source` has three options, all local:
+This is three nodes now, each owning one concern:
+
+| Node | Owns |
+| --- | --- |
+| **Qwen Image 2.1 PE Loader** | Everything about the weights: source, both PE encoders, the GGUF model and mmproj, offload layers, context length, system-prompt override, unload-after-run, and the `clip` input. Wire its output into the enhancer's `pe_model` |
+| **Qwen Image 2.1 PE Settings** (optional) | Sampling: preset, temperature, top_p, top_k, presence_penalty, max_new_tokens. Wire it into `pe_settings`; **leave it off to use the official settings** |
+| **Qwen Image 2.1 Prompt Enhancer** | Only what changes per run: prompt, task, seed, aspect ratio, target megapixels, cache toggle, and 1-10 reference images |
+
+`Model Source` on the loader has three options, all local:
 
 | Source | How |
 | --- | --- |
