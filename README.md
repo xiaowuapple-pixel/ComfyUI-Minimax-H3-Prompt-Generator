@@ -66,7 +66,7 @@ GPU 卸载层数默认为 `-1`，表示全部放入显存；显存不足时可�
 - 另外输出 `Width` / `Height` 两个整数：t2i 按模型选的画幅 + `Target Megapixels` 换算，edit 直接沿用参考图尺寸
 - `t2i` 只接受文字；`edit` 最多 10 张参考图（模型上限），按顺序用 `<image1>`… 引用，顺序不能乱
 - 图片端口是动态的：默认只显示 `Image 1`，连上以后才长出 `Image 2`，依次类推，最多 10 个
-- 思考块默认关闭（加载节点上的 `Thinking` 开关可以打开），思考内容始终不会写进提示词
+- 思考默认开启，长度由加载节点上的 `Plan Tokens` 控制（默认 800，`-1` 为不限）；思考内容始终不会写进提示词
 - 采样默认使用官方出厂值：`t2i` 的 `presence_penalty=1.5`，`edit` 为 `0`；切成 `Custom` 才能手改
 - 本地 GGUF 与在线 LLM 都支持，和 H3 Prompt 共用同一套运行时
 - 解析失败时 `Positive Prompt` 回退为原始回答文本，并输出 `Parse OK=false`，不会静默丢结果
@@ -135,21 +135,28 @@ GPU 卸载层数默认为 `-1`，表示全部放入显存；显存不足时可�
 
 ### 关于速度
 
-4080 16GB + Q5_K_M GGUF，一次扩写实测：
+4080 16GB + Q5_K_M GGUF，一次带图改写实测（请求：五张参考图 + 角色卡设定）：
 
-| 模式 | 文生图 | 带图改写 |
+| 模式 | 耗时 | 提示词 |
 | --- | --- | --- |
-| `Direct`（关思考，默认） | 约 7 秒 | 约 8.5 秒 |
-| `Think`（官方出厂设置） | 约 19 秒 | 约 52 秒 |
-| 原生 int8 safetensors（开思考） | 约 2 分钟 | 更慢 |
+| `Direct`（关思考） | 约 9 秒 | 455 字，没有权衡需求的过程，细节明显变少 |
+| `Think` + `Plan Tokens` 800（默认） | 约 26 秒 | 688 字 |
+| `Think` + `Plan Tokens` 400 | 约 15 秒 | 666 字 |
+| `Think` + `Plan Tokens` -1（官方完整思考） | 约 92 秒 | 720 字 |
+| 原生 int8 safetensors（开思考） | 十分钟以上 | — |
 
-时间几乎全花在那轮思考上：带图改写开思考时一共 3948 个 token，真正的答案只有几百个。
-关掉思考后 JSON 契约和提示词质量都不受影响，所以默认关。这两个 checkpoint **没有 MTP 头**，
-投机解码用不上（节点里的"auto"会退化成普通采样）。
+时间几乎全花在那轮思考上：同一条请求，模型写了 **7038 个 token 的规划、89 秒**，
+而真正的答案只有 350 个 token。所以 `Plan Tokens` 是这里最值钱的开关：写到上限就收住，
+把已经写好的规划交还给模型直接写答案（多付一次预填充，约 2-3 秒）。
+规划越短越容易漏掉请求里的隐含要求——上面同一条请求里"附带详细文字说明"，
+完整思考的版本写出了文字框和标题，400 的版本就没写。
+
+这两个 checkpoint **没有 MTP 头**，投机解码用不上（节点里的"auto"会退化成普通采样）。
 
 能用的加速手段，按效果排序：
 
-1. **`Thinking` 保持关（默认）**。带图改写 52 秒 → 8.5 秒，文生图 19 秒 → 7 秒。
+1. **调 `Plan Tokens`**。默认 800（约 26 秒）；追求快就 400（约 15 秒），
+   追求细节就 `-1`（约 92 秒）。它只在 `Thinking` 打开时生效。
 2. **反复调提示词时关掉 `Unload Model After Generation`**。节点会留着已载入的模型，
    下一次运行连载入都省掉（实测 4.0 秒 → 0.0 秒）。跑完整出图工作流前记得再打开，
    否则那 6 GB 会一直占着显存。
@@ -225,7 +232,8 @@ Qwen3.5-VL 9B) and turns a short request into the long prompt 2.1 expects.
 - `Width` / `Height` are pixels: t2i scales the model's ratio to `Target Megapixels`, edit reuses the source image's size
 - `t2i` takes text only; `edit` takes up to 10 reference images (the model's limit), referenced as `<image1>`... in connection order
 - Image sockets are dynamic: only `Image 1` shows at first, and connecting it reveals `Image 2`, up to ten
-- Thinking is off by default (the loader's `Thinking` switch turns it back on) and never leaks into the prompt
+- Thinking is on by default and its length is capped by the loader's `Plan Tokens` (800 by default, -1 for no cap);
+  the reasoning never leaks into the prompt
 - Official per-task sampling by default (`presence_penalty` 1.5 for t2i, 0 for edit); switch to `Custom` to override
 - Local GGUF and hosted LLM sources, sharing the same runtime as H3 Prompt
 - On a parse failure `Positive Prompt` falls back to the raw answer and `Parse OK` is false, so nothing is lost silently
@@ -295,22 +303,28 @@ Measured on a 4080: about 14 tokens/s, so one t2i expansion including its thinki
 
 ### About speed
 
-Measured on a 4080 (16 GB) with the Q5_K_M GGUF, one expansion:
+Measured on a 4080 (16 GB) with the Q5_K_M GGUF, one edit rewrite (five reference images plus a character-card
+request):
 
-| Mode | t2i | edit (one image) |
+| Mode | Time | Prompt |
 | --- | --- | --- |
-| `Direct` (thinking off, the default) | ~7 s | ~8.5 s |
-| `Think` (the official setting) | ~19 s | ~52 s |
-| Native int8 safetensors (thinking on) | ~2 min | slower still |
+| `Direct` (thinking off) | ~9 s | 455 characters, written without weighing the request |
+| `Think` + `Plan Tokens` 800 (default) | ~26 s | 688 characters |
+| `Think` + `Plan Tokens` 400 | ~15 s | 666 characters |
+| `Think` + `Plan Tokens` -1 (the official setting) | ~92 s | 720 characters |
+| Native int8 safetensors (thinking on) | ten minutes or more | -- |
 
-The time is almost entirely the thinking block: with it on, an edit rewrite emitted 3948 tokens, of which the
-answer itself was a few hundred. The JSON contract and the prompt quality held up with it off in testing, which
-is why `Direct` is the default. Neither checkpoint ships an MTP head, so speculative decoding is not available
-(the node's "auto" quietly falls back to plain sampling).
+The time is almost entirely the plan: the same request emitted 7038 tokens of planning (89 s) against a
+350-token answer. `Plan Tokens` is the lever -- the node stops reading once the budget is spent and hands the
+plan back so the model writes the answer (one extra prefill, 2-3 s). Shorter plans miss implied requirements:
+on that request "include a detailed text description", the full plan produced a text panel with a title, the
+400-token one did not. Neither checkpoint ships an MTP head, so speculative decoding is not available (the
+node's "auto" quietly falls back to plain sampling).
 
 What actually helps, best first:
 
-1. **Leave `Thinking` off.** 52 s -> 8.5 s on the edit task, 19 s -> 7 s on t2i.
+1. **Pick a `Plan Tokens` budget.** 800 is the default (~26 s); 400 is ~15 s; `-1` is the official full plan
+   (~92 s). It only applies while `Thinking` is on.
 2. **Turn `Unload Model After Generation` off while you iterate.** The node then keeps the runtime resident and
    a second run skips the load entirely (measured: 4.0 s -> 0.0 s). Turn it back on before queueing a full image
    workflow, or the 6 GB stays parked in VRAM.

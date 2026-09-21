@@ -452,6 +452,54 @@ def _reset_runtime(llm):
         pass
 
 
+def _stream_plan(llm, messages, budget, **parameters):
+    """Stream the private plan and cut it off once it has run past `budget`.
+
+    The plan is where the minute goes: on a five-image request it measured 7038
+    tokens against a 350-token answer. There is no way to ask for less plan --
+    the model keeps deliberating -- so the only lever is to stop reading and
+    hand the plan it has already written back to it as context (see
+    `ANSWER_PREFILL` and the second pass in `_enhance_one`).
+
+    Returns (text, truncated). `truncated` means the model was still planning
+    when the budget ran out, so the caller owes it a second pass; if False the
+    stream ended on its own and `text` is a finished answer.
+    """
+    started = time.perf_counter()
+    pieces = []
+    tokens = 0
+    truncated = False
+    planning = True
+    print(f"[Qwen Image 2.1 PE] 开始内部规划（上限 {budget} tokens）...")
+    _reset_runtime(llm)
+    stream = llm.create_chat_completion(messages=messages, stream=True, **parameters)
+    for chunk in stream:
+        delta = chunk.get("choices", [{}])[0].get("delta", {}).get("content")
+        if not delta:
+            continue
+        pieces.append(delta)
+        tokens += 1
+        text = "".join(pieces)
+        if planning:
+            if "</think>" in text:
+                # It finished planning inside the budget; let it write normally.
+                planning = False
+            elif tokens >= budget:
+                truncated = True
+                break
+        elif _answer_complete(text, False):
+            break
+    elapsed = time.perf_counter() - started
+    if truncated:
+        print(
+            f"[Qwen Image 2.1 PE] 规划到 {tokens} tokens 收住（{elapsed:.1f}s），"
+            "现在把这段规划交还给模型，让它直接写答案。"
+        )
+    else:
+        print(f"[Qwen Image 2.1 PE] 模型在预算内自己完成了规划（{tokens} tokens，{elapsed:.1f}s）。")
+    return "".join(pieces), truncated
+
+
 def _stream_answer(llm, messages, stage, thinking, **parameters):
     """Stream a completion, stopping the moment the JSON answer is closed.
 
@@ -713,6 +761,10 @@ def _pe_bundle(source, **values):
         "system_prompt_file": "",
         "thinking": False,
         "unload": True,
+        # -1 keeps the official behaviour (plan until the model stops on its
+        # own). The GGUF loader exposes this; the native path has no streaming,
+        # so it never reads it.
+        "plan_tokens": -1,
     }
     bundle.update(values)
     return bundle
@@ -729,10 +781,15 @@ def _report_bundle(bundle):
     window = (
         f" | 上下文={bundle['context_length']}" if bundle["source"] == SOURCE_GGUF else ""
     )
+    plan = bundle["plan_tokens"]
+    plan_text = ""
+    if bundle["thinking"] and bundle["source"] == SOURCE_GGUF:
+        plan_text = " | 规划=不限" if plan < 0 else f" | 规划={plan} tokens"
     print(
         f"[Qwen Image 2.1 PE] 加载节点：{bundle['source']}{window}"
         f" | 系统提示词={'自定义文件' if bundle['system_prompt_file'] else '官方内置'}"
         f" | 思考={'开' if bundle['thinking'] else '关'}"
+        f"{plan_text}"
         f" | 用完{'卸载' if bundle['unload'] else '保留'}"
     )
 
@@ -788,11 +845,12 @@ class QwenImage21PELoaderSafetensors:
                         "default": False,
                         "label_on": "Think",
                         "label_off": "Direct",
-                        "tooltip": "默认关（Direct）：直接写答案，实测 t2i 约 7 秒、带图改写约 8 秒。"
-                                   "打开（Think）：模型先内部推理八步再写，官方出厂设置，"
-                                   "实测 t2i 约 19 秒、带图改写约 54 秒，那轮规划占掉绝大部分 token。"
-                                   "两种模式产出的 JSON 契约与提示词质量基本一致，"
-                                   "只有特别复杂的改写才值得打开。",
+                        "tooltip": "要不要让模型先内部推理再写答案。"
+                                   "关（Direct）：直接写答案，比 GGUF 快，实测带图改写约 29 秒，"
+                                   "但没有分析画面和权衡需求的机会，出来的提示词会明显变浅。"
+                                   "开（Think）：质量好得多，但原生推理拿不到流式输出、无法中途截断，"
+                                   "所以只能是完整思考——实测一次带图改写要十分钟以上。"
+                                   "要质量又要速度，请换上面的 GGUF 加载节点，那边有 Plan Tokens 可以限制规划长度。",
                     },
                 ),
                 "Unload Model After Generation": ("BOOLEAN", {"default": True}),
@@ -874,17 +932,32 @@ class QwenImage21PELoaderGGUF:
                 "Thinking": (
                     "BOOLEAN",
                     {
-                        "default": False,
+                        "default": True,
                         "label_on": "Think",
                         "label_off": "Direct",
-                        "tooltip": "默认关（Direct）：直接写答案，实测 t2i 约 7 秒、带图改写约 8 秒。"
-                                   "打开（Think）：模型先内部推理八步再写，官方出厂设置，"
-                                   "实测 t2i 约 19 秒、带图改写约 54 秒（3948 个 token 里绝大部分是规划）。"
-                                   "两种模式产出的 JSON 契约与提示词质量基本一致，"
-                                   "只有特别复杂的改写才值得打开。",
+                        "tooltip": "要不要让模型先内部推理再写答案。"
+                                   "关（Direct）最快，实测 t2i 约 7 秒、带图改写约 8 秒，"
+                                   "但它没有分析画面和权衡需求的机会，复杂请求出来的提示词会明显变浅。"
+                                   "开（Think）质量好得多，规划长度由下面的 Plan Tokens 控制。",
                     },
                 ),
                 "Unload Model After Generation": ("BOOLEAN", {"default": True}),
+                "Plan Tokens": (
+                    "INT",
+                    {
+                        "default": 800,
+                        "min": -1,
+                        "max": 16384,
+                        "step": 100,
+                        "tooltip": "思考（规划）的 token 上限，只在 Thinking 打开时生效。"
+                                   "推理是这里最贵的一段：实测一次五图改写写了 7038 个 token、89 秒，"
+                                   "而答案只有 350 个 token。"
+                                   "写到上限就收住，把已经写好的规划交还给模型直接写答案，"
+                                   "所以越小越快：800 约 20 秒、400 约 15 秒。"
+                                   "-1 = 不限，等于官方完整思考（约 90 秒，细节最全）。"
+                                   "规划越短，越容易漏掉请求里的隐含要求。",
+                    },
+                ),
             },
         }
 
@@ -904,10 +977,11 @@ class QwenImage21PELoaderGGUF:
             context_length=int(
                 inputs.get("Context Length", DEFAULT_CONTEXT_LENGTH) or DEFAULT_CONTEXT_LENGTH
             ),
-            system_prompt_file=inputs.get("System Prompt File", ""),
-            thinking=bool(inputs.get("Thinking", False)),
-            unload=bool(inputs.get("Unload Model After Generation", True)),
-        )
+                system_prompt_file=inputs.get("System Prompt File", ""),
+                thinking=bool(inputs.get("Thinking", True)),
+                unload=bool(inputs.get("Unload Model After Generation", True)),
+                plan_tokens=int(inputs.get("Plan Tokens", -1)),
+            )
         _report_bundle(bundle)
         return (bundle,)
 
@@ -1185,6 +1259,7 @@ class QwenImage21PromptEnhancer:
                     "seed": seed,
                     "aspect": forced_ratio,
                     "thinking": thinking,
+                    "plan_tokens": int(model.get("plan_tokens", -1)),
                 },
             )
             cached = _cache_read(cache_key)
@@ -1301,13 +1376,25 @@ class QwenImage21PromptEnhancer:
             # The local llama-cpp-python build exposes llama.cpp's own names, so
             # map them before the call.
             sampling = _adapt_sampling(llm, sampling)
-            raw = _stream_answer(
-                llm,
-                messages,
-                f"Qwen Image 2.1 {task} 提示词扩写",
-                thinking,
-                **sampling,
-            )
+            stage = f"Qwen Image 2.1 {task} 提示词扩写"
+            plan_tokens = int(model.get("plan_tokens", -1))
+            if thinking and plan_tokens >= 0:
+                raw, truncated = _stream_plan(llm, messages, plan_tokens, **sampling)
+                if truncated and raw.strip():
+                    # Hand the half-written plan back as the assistant turn and
+                    # turn the generation prompt off, so the model continues from
+                    # inside the answer instead of opening a new turn.
+                    messages = messages + [
+                        {
+                            "role": "assistant",
+                            "content": raw.rstrip() + "\n</think>\n\n" + ANSWER_PREFILL,
+                        }
+                    ]
+                    sampling["add_generation_prompt"] = False
+                    raw = _stream_answer(llm, messages, f"{stage}（写答案）", False, **sampling)
+                    raw = _restore_prefill(raw)
+            else:
+                raw = _stream_answer(llm, messages, stage, thinking, **sampling)
         finally:
             if is_last and bool(model.get("unload", True)):
                 _VisionRuntime.close()
