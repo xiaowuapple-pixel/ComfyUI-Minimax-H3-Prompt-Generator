@@ -1058,6 +1058,161 @@ class QwenImage21PESettings:
         )
 
 
+def _as_text_list(value):
+    """A list input arrives as a list, a tuple, or a bare scalar.
+
+    Whether ComfyUI maps a list over the node or hands it over whole depends on
+    where the value came from, so both shapes are accepted here.
+    """
+    if isinstance(value, (list, tuple)):
+        return ["" if item is None else str(item) for item in value]
+    return ["" if value is None else str(value)]
+
+
+class QwenImage21TextEncodeList:
+    """Text Encode Qwen Image 2.1, with a prompt that may be a list.
+
+    The stock node takes a single string, so wiring this pack's enhancer into it
+    dies inside the tokenizer -- the list output arrives whole and
+    `text.startswith` is called on it ('list' object has no attribute
+    'startswith'). This node encodes every prompt with the same reference images
+    and returns lists of conditioning, so a Prompt Count above 1 actually reaches
+    the sampler.
+
+    Reference images are resized and VAE-encoded once and reused for every
+    prompt, and the empty latent is built from the first reference's size, which
+    is what the stock node does.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        optional = {
+            "vae": ("VAE", {"tooltip": "接上才会把参考图编成 reference latents（改图流程需要）。"}),
+        }
+        for index in range(1, 7):
+            optional[f"image_{index}"] = (
+                "IMAGE",
+                {"tooltip": f"第 {index} 张参考图，按 image_1…image_6 的顺序排。"},
+            )
+        return {
+            "required": {
+                "clip": ("CLIP", {"tooltip": "Qwen Image 2.1 的文本编码器。"}),
+                "prompts": (
+                    "STRING",
+                    {
+                        "multiline": True,
+                        "default": "",
+                        "tooltip": "提示词。可以接提示词增强节点的 Positive Prompt（列表），"
+                                   "一条提示词会编成一份 conditioning。",
+                    },
+                ),
+                "negative_prompt": ("STRING", {"multiline": True, "default": ""}),
+                "resolution": (
+                    "INT",
+                    {
+                        "default": 1024,
+                        "min": 0,
+                        "max": 4096,
+                        "step": 32,
+                        "tooltip": "参考图会缩放到大约 resolution × resolution 像素（32 的倍数，保持比例）。"
+                                   "0 表示保持原尺寸，只补到 32 的倍数。",
+                    },
+                ),
+            },
+            "optional": optional,
+        }
+
+    RETURN_TYPES = ("CONDITIONING", "CONDITIONING", "LATENT")
+    RETURN_NAMES = ("positive", "negative", "latent")
+    OUTPUT_IS_LIST = (True, True, True)
+    FUNCTION = "encode"
+    CATEGORY = "Prompt Enhancer"
+    DESCRIPTION = "Encode a list of prompts with one set of reference images; outputs are lists too."
+
+    def encode(self, clip, prompts, negative_prompt, resolution, **optional):
+        import comfy.model_management
+        import comfy.utils
+        import node_helpers
+        import torch
+
+        prompt_list = _as_text_list(prompts)
+        negative_list = _as_text_list(negative_prompt)
+        images = [
+            optional[f"image_{index}"]
+            for index in range(1, 7)
+            if optional.get(f"image_{index}") is not None
+        ]
+        vae = optional.get("vae")
+
+        ref_latents = []
+        images_vl = []
+        latent_w = latent_h = resolution or 1024
+        for image in images:
+            samples = image[:1].movedim(-1, 1)
+            if resolution > 0:
+                ratio = samples.shape[3] / samples.shape[2]
+                width = round(math.sqrt(resolution * resolution * ratio) / 32) * 32
+                height = round(math.sqrt(resolution * resolution / ratio) / 32) * 32
+            else:
+                width = round(samples.shape[3] / 32) * 32
+                height = round(samples.shape[2] / 32) * 32
+            width, height = max(32, width), max(32, height)
+            if (width, height) == (samples.shape[3], samples.shape[2]):
+                scaled = image[:1]
+            else:
+                scaled = comfy.utils.common_upscale(
+                    samples, width, height, "lanczos", "disabled"
+                ).movedim(1, -1)
+            if not images_vl:
+                latent_w, latent_h = width, height
+            rgb = scaled[:, :, :, :3]
+            if scaled.shape[-1] > 3:
+                # The vision tower sees alpha over white; the VAE keeps all four.
+                rgb = rgb * scaled[:, :, :, 3:] + (1.0 - scaled[:, :, :, 3:])
+            images_vl.append(rgb)
+            if vae is not None:
+                ref_latents.append(vae.encode(scaled))
+
+        keep_vision = len(ref_latents) == 0
+        positives = []
+        negatives = []
+        for index, prompt in enumerate(prompt_list):
+            negative = negative_list[index] if len(negative_list) > 1 else negative_list[0]
+            positive = clip.encode_from_tokens_scheduled(
+                clip.tokenize(prompt, images=images_vl, keep_vision=keep_vision, prevent_empty_text=True)
+            )
+            negative_out = clip.encode_from_tokens_scheduled(
+                clip.tokenize(negative, images=images_vl, keep_vision=keep_vision, prevent_empty_text=True)
+            )
+            if ref_latents:
+                positive = node_helpers.conditioning_set_values(
+                    positive, {"reference_latents": ref_latents}, append=True
+                )
+                negative_out = node_helpers.conditioning_set_values(
+                    negative_out, {"reference_latents": ref_latents}, append=True
+                )
+            positives.append(positive)
+            negatives.append(negative_out)
+
+        # One latent per prompt: they share a size but must not share a tensor,
+        # or a sampler that edits its input would hand the change to the next one.
+        latents = [
+            {
+                "samples": torch.zeros(
+                    [1, 64, latent_h // 16, latent_w // 16],
+                    device=comfy.model_management.intermediate_device(),
+                )
+            }
+            for _ in positives
+        ]
+        print(
+            f"[Prompt Enhancer] Text Encode (list)：{len(positives)} 条提示词"
+            f"，参考图 {len(images_vl)} 张"
+            + ("（已并入 reference latents）" if ref_latents else "")
+        )
+        return (positives, negatives, latents)
+
+
 class PromptEnhancerReleaseTextEncoder:
     """Hand the text encoder's VRAM back before the image model needs it.
 

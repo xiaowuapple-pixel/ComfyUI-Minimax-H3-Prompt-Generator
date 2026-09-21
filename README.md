@@ -122,6 +122,12 @@ GPU 卸载层数默认为 `-1`，表示全部放入显存；显存不足时可�
 | **Qwen Image 2.1 PE Settings**（可选） | 采样参数：预设、temperature、top_p、top_k、presence_penalty、max_new_tokens。接到主节点的 `pe_settings`；**不接就用官方出厂值** |
 | **Qwen Image 2.1 Prompt Enhancer** | 只有每次运行才会变的东西：提示词、任务、种子、画幅、目标像素、缓存开关、输出条数，以及 1-10 张参考图 |
 
+还有一个**支持列表的文本编码节点** **Text Encode Qwen Image 2.1 (List)**。官方的 `Text Encode
+Qwen Image 2.1` 只吃单个字符串，把增强节点的 `Positive Prompt`（列表）接过去会直接崩在
+`'list' object has no attribute 'startswith'`。这个节点输入输出都是列表：`prompts` 接列表，
+`positive` / `negative` / `latent` 也按同样的条数输出，所以 `Prompt Count` 大于 1 时每条提示词
+都能各自走到采样器。参考图只缩放和 VAE 编码一次，所有提示词共用。
+
 另外还有一个通用小工具节点 **Release Text Encoder (VRAM)**：把它串在文本编码之后、采样器之前
 （`conditioning` 进、`conditioning` 出，另接同一路 `clip`），它会在条件已经算完之后把文本编码器
 从显存里放掉。条件是现成的，所以画面不受影响；释放的是你指定的那个编码器（以及本包自己缓存的 PE 编码器），
@@ -293,6 +299,12 @@ This is four nodes now, each owning one concern:
 | **Qwen Image 2.1 PE Loader (GGUF)** | The PE GGUF quants: `T2I GGUF` + `I2I GGUF` + `Vision Model` (mmproj) + `GPU Offload Layers`. Measured about 5x faster than the native int8 path |
 | **Qwen Image 2.1 PE Settings** (optional) | Sampling: preset, temperature, top_p, top_k, presence_penalty, max_new_tokens. Wire it into `pe_settings`; **leave it off to use the official settings** |
 | **Qwen Image 2.1 Prompt Enhancer** | Only what changes per run: prompt, task, seed, aspect ratio, target megapixels, cache toggle, prompt count, and 1-10 reference images |
+
+There is also a **list-aware text encoder**, **Text Encode Qwen Image 2.1 (List)**. The stock
+`Text Encode Qwen Image 2.1` takes one string, so wiring the enhancer's `Positive Prompt` (a list) into
+it dies with `'list' object has no attribute 'startswith'`. This one takes a list in and returns lists
+of `positive` / `negative` / `latent`, so a `Prompt Count` above 1 reaches the sampler one prompt at a
+time. Reference images are resized and VAE-encoded once and shared by every prompt.
 
 There is also a small general-purpose node, **Release Text Encoder (VRAM)**. Wire it between the text
 encode and the sampler (`conditioning` in, `conditioning` out, plus the same `clip`), and it drops the
