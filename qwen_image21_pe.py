@@ -694,6 +694,17 @@ _WHITE_WORD = r"(?:纯白|洁白|雪白|素白|白色|白)"
 _WHITE_BACKDROP = re.compile(
     rf"{_WHITE_ADJECTIVE}?{_WHITE_WORD}{_WHITE_ADJECTIVE}?的?(?:背景|底)"
 )
+
+# The other half of the problem, found by the field: a poster brief says "四周留
+# 出大片白色空白用于排版文字", and that colour word describes the canvas itself,
+# so the model paints an opaque plate instead of leaving alpha. 留白/空白 is the
+# layout term for the same area, so dropping just the colour keeps the brief
+# intact -- and the alpha comes back. Measured: with the white words left in the
+# channel was usually missing, with them removed it was usually there.
+# Only these nouns are touched, so white clothing and white flowers are safe.
+_WHITE_EMPTY_AREA = re.compile(
+    rf"(?:{_WHITE_ADJECTIVE}?{_WHITE_WORD}的?)(?=(?:空白|留白|空处|空白处|空白区|空区域|背景留白))"
+)
 _OPAQUE_BACKGROUND_CLAUSE = re.compile(
     r"背景[^。；\n]{0,8}?(?:替换为|改为|换成|变成|为|是|用)\s*(?:纯白色|纯白|白色)的?(?=\s*(?:[，。；、]|$))",
 )
@@ -730,6 +741,7 @@ def _restore_transparency(original, parsed):
     fixed = _OPAQUE_BACKGROUND_CLAUSE.sub("背景为透明背景", fixed)
     fixed = _OPAQUE_BACKGROUND_CLAUSE_EN.sub("background is transparent", fixed)
     fixed = _WHITE_BACKDROP.sub("透明背景", fixed)
+    fixed = _WHITE_EMPTY_AREA.sub("", fixed)
     hint = _TRANSPARENCY_HINT["zh" if re.search(r"[\u4e00-\u9fff]", fixed) else "en"]
     if "alpha" not in fixed.lower():
         fixed = fixed.rstrip() + " " + hint
