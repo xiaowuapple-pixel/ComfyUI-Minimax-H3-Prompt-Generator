@@ -1049,15 +1049,34 @@ class QwenImage21PESettings:
         )
 
 
-def _as_text_list(value):
-    """A list input arrives as a list, a tuple, or a bare scalar.
+def _scalar(value, default=None):
+    """Unwrap one level.
 
-    Whether ComfyUI maps a list over the node or hands it over whole depends on
-    where the value came from, so both shapes are accepted here.
+    With INPUT_IS_LIST set, ComfyUI hands over every input as the list it caches
+    outputs in: a clip arrives as [clip], a widget as [1024], a linked list as
+    its own items. One level is all it ever adds.
     """
     if isinstance(value, (list, tuple)):
-        return ["" if item is None else str(item) for item in value]
-    return ["" if value is None else str(value)]
+        return value[0] if value else default
+    return default if value is None else value
+
+
+def _as_text_list(value):
+    """The prompts, flattened.
+
+    A node sitting between the enhancer and here (easy showAnything, for one)
+    hands a list over wrapped in another list. Taking only the outer level would
+    then encode all three prompts on every pass, and ComfyUI's mapping over the
+    canvas inputs multiplies that into nine images for a Prompt Count of three.
+    """
+    items = value if isinstance(value, (list, tuple)) else [value]
+    texts = []
+    for item in items:
+        if isinstance(item, (list, tuple)):
+            texts.extend("" if entry is None else str(entry) for entry in item)
+        elif item is not None:
+            texts.append(str(item))
+    return texts or [""]
 
 
 class QwenImage21TextEncodeList:
@@ -1135,6 +1154,11 @@ class QwenImage21TextEncodeList:
 
     RETURN_TYPES = ("CONDITIONING", "CONDITIONING", "LATENT")
     RETURN_NAMES = ("positive", "negative", "latent")
+    # Take the prompts whole and loop here, rather than letting ComfyUI map the
+    # node over the list inputs. With the mapping, a node in between that wraps
+    # the list (easy showAnything does) makes both mechanisms apply at once:
+    # three prompts came out as nine images and a 205 s sampler run.
+    INPUT_IS_LIST = True
     OUTPUT_TOOLTIPS = (
         "正面条件。",
         "负面条件。",
@@ -1153,20 +1177,23 @@ class QwenImage21TextEncodeList:
         import node_helpers
         import torch
 
+        clip = _scalar(clip)
+        resolution = int(_scalar(resolution, 1024) or 1024)
         prompt_list = _as_text_list(prompts)
         negative_list = _as_text_list(negative_prompt)
         images = [
-            optional[f"image_{index}"]
+            _scalar(optional[f"image_{index}"])
             for index in range(1, MAX_INPUT_IMAGES + 1)
             if optional.get(f"image_{index}") is not None
         ]
-        vae = optional.get("vae")
+        images = [image for image in images if image is not None]
+        vae = _scalar(optional.get("vae"))
         # Explicit canvas, normally wired from the enhancer's Width/Height. The
         # latent has to be a multiple of 16 (2.1's spatial downscale) or the
         # decoded image comes out a different size than the one that was asked
         # for, so the value is snapped rather than rejected.
-        target_w = int(optional.get("width") or 0)
-        target_h = int(optional.get("height") or 0)
+        target_w = int(_scalar(optional.get("width"), 0) or 0)
+        target_h = int(_scalar(optional.get("height"), 0) or 0)
 
         ref_latents = []
         images_vl = []

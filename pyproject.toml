@@ -1,6 +1,6 @@
 [project]
 name = "comfyui-prompt-enhancer-suite"
-version = "1.0.2"
+version = "1.0.3"
 description = "Prompt enhancer nodes for ComfyUI: Qwen Image 2.1 prompt expansion (PE-T2I / PE-I2I), MiniMax H3 video prompts, and general image prompts."
 license = {file = "LICENSE"}
 requires-python = ">=3.10"
