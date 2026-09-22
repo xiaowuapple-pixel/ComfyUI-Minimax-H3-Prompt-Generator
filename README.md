@@ -170,7 +170,7 @@ Qwen Image 2.1` 只吃单个字符串，把增强节点的 `Positive Prompt`（�
 | 输出 | 接到哪 |
 | --- | --- |
 | `Positive Prompt` | 2.1 的文本编码节点（`CLIPTextEncode` / `TextEncodeQwenImage21`）的正向输入 |
-| `Width` / `Height` | 直接接 `空Latent`（EmptyLatentImage）的 width/height。这是最省事的一路 |
+| `Width` / `Height` | 接 `Text Encode Qwen Image 2.1 (List)` 的 `width` / `height`。这两个数是 16 的倍数，正是 2.1 的 latent 能精确表示、并且带 alpha 层的尺寸；接普通 `空Latent` 也能出图，但那条路没有 alpha 层，背景必然是不透明的 |
 | `WH Ratio` | 不用接，是模型选画幅的原始记录（形如 `16:9`）。注意官方 `分辨率选择器` 的选项带后缀（`16:9 (Widescreen)`），直接连过去校验不过，所以宽高已经帮你算好了 |
 | `Ratio Follow` | 不用接，edit 专用信息（形如 `<image1>`），表示输出沿用哪张参考图的画幅 |
 | `Parse OK` | 不用接。`false` 表示模型没吐出预期 JSON，此时 `Positive Prompt` 是原始回答文本，可以用来判断这次结果要不要用 |
@@ -357,7 +357,7 @@ Where the outputs go:
 | Output | Destination |
 | --- | --- |
 | `Positive Prompt` | the positive side of the 2.1 text encoder (`CLIPTextEncode` / `TextEncodeQwenImage21`) |
-| `Width` / `Height` | straight into an Empty Latent Image (or any width/height input) -- the simplest path |
+| `Width` / `Height` | into `Text Encode Qwen Image 2.1 (List)`'s `width` / `height`. They are multiples of 16, which is a size 2.1's latent represents exactly and carries an alpha layer for; an Empty Latent Image also renders, but it has no alpha layer, so the background comes out opaque |
 | `WH Ratio` | leave unconnected; it is the model's own record of the canvas (`16:9`). The core Resolution Selector expects labels with suffixes (`16:9 (Widescreen)`), so a direct link will not validate -- that is why Width/Height are computed for you |
 | `Ratio Follow` | leave unconnected; edit only, names the reference image whose framing the output keeps (`<image1>`) |
 | `Parse OK` | leave unconnected; `false` means the answer was not the expected JSON and Positive Prompt holds the raw text |

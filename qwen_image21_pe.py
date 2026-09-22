@@ -740,8 +740,13 @@ def _ratio_to_pair(text):
     return (width, height) if width > 0 and height > 0 else None
 
 
-def _canvas_from_pair(pair, megapixels, multiple=8):
-    """Pixel size at the given ratio. Same math as the Resolution Selector."""
+def _canvas_from_pair(pair, megapixels, multiple=16):
+    """Pixel size at the given ratio. Same math as the Resolution Selector.
+
+    16 is Qwen-Image-2.1's spatial downscale, so a size that is a multiple of it
+    is one the latent can represent exactly -- the size reported here is the size
+    that comes back out of the VAE.
+    """
     w_ratio, h_ratio = pair
     scale = math.sqrt(float(megapixels) * 1024 * 1024 / (w_ratio * h_ratio))
     width = round(w_ratio * scale / multiple) * multiple
@@ -749,7 +754,7 @@ def _canvas_from_pair(pair, megapixels, multiple=8):
     return max(multiple, int(width)), max(multiple, int(height))
 
 
-def _canvas_from_image(image, multiple=8):
+def _canvas_from_image(image, multiple=16):
     """Framing of one source image, used by edit runs (ratio_follow names it)."""
     height, width = int(image.shape[-3]), int(image.shape[-2])
     return (
@@ -763,7 +768,7 @@ def _image_index(text):
     return int(match.group(1)) - 1 if match else -1
 
 
-def _resolve_canvas(parsed, images, megapixels, multiple=8, forced_pair=None):
+def _resolve_canvas(parsed, images, megapixels, multiple=16, forced_pair=None):
     """Pixel size for the render, so WH Ratio is usable without hand-copying.
 
     t2i: the model picked the ratio, the megapixel budget is yours.
@@ -1162,6 +1167,26 @@ class QwenImage21TextEncodeList:
                 "IMAGE",
                 {"tooltip": f"参考图 {index}，最多 {MAX_INPUT_IMAGES} 张。"},
             )
+        optional["width"] = (
+            "INT",
+            {
+                "default": 0,
+                "min": 0,
+                "max": 8192,
+                "step": 16,
+                "tooltip": "画布宽度。0=按参考图（没接图时按 resolution）。接增强节点的 Width 就固定了。",
+            },
+        )
+        optional["height"] = (
+            "INT",
+            {
+                "default": 0,
+                "min": 0,
+                "max": 8192,
+                "step": 16,
+                "tooltip": "画布高度。0=按参考图（没接图时按 resolution）。和 Width 一起接即可固定。",
+            },
+        )
         return {
             "required": {
                 "clip": ("CLIP", {"tooltip": "Qwen Image 2.1 文本编码器。"}),
@@ -1194,7 +1219,8 @@ class QwenImage21TextEncodeList:
         "正面条件。",
         "负面条件。",
         "空 latent（16 通道 × 4 层，带 alpha 层）。要透明背景必须用这一路："
-        "普通「空Latent」只有 4 通道、没有 alpha 层，提示词写得再对也只会得到纯白背景。",
+        "普通「空Latent」只有 4 通道、没有 alpha 层，提示词写得再对也只会得到纯白背景。"
+        "尺寸默认跟参考图；接上 Width/Height 就按它们出图。",
     )
     OUTPUT_IS_LIST = (True, True, True)
     FUNCTION = "encode"
@@ -1215,6 +1241,12 @@ class QwenImage21TextEncodeList:
             if optional.get(f"image_{index}") is not None
         ]
         vae = optional.get("vae")
+        # Explicit canvas, normally wired from the enhancer's Width/Height. The
+        # latent has to be a multiple of 16 (2.1's spatial downscale) or the
+        # decoded image comes out a different size than the one that was asked
+        # for, so the value is snapped rather than rejected.
+        target_w = int(optional.get("width") or 0)
+        target_h = int(optional.get("height") or 0)
 
         ref_latents = []
         images_vl = []
@@ -1244,6 +1276,10 @@ class QwenImage21TextEncodeList:
             images_vl.append(rgb)
             if vae is not None:
                 ref_latents.append(vae.encode(scaled))
+
+        if target_w > 0 and target_h > 0:
+            latent_w = max(16, round(target_w / 16) * 16)
+            latent_h = max(16, round(target_h / 16) * 16)
 
         keep_vision = len(ref_latents) == 0
         positives = []
