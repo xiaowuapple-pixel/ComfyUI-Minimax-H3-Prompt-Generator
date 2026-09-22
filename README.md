@@ -138,6 +138,11 @@ Qwen Image 2.1` 只吃单个字符串，把增强节点的 `Positive Prompt`（�
 都能各自走到采样器。参考图只缩放和 VAE 编码一次，所有提示词共用。
 
 另外还有一个通用小工具节点 **Release Text Encoder (VRAM)**：把它串在文本编码之后、采样器之前
+
+还有一个 **Load Image (recursive)**：和官方的「加载图像」一样，但下拉里会列出 `input/` 的**全部子目录**
+（比如粘贴进来的 `pasted/image (64).png`）。以前这个便利是靠改写核心 `LoadImage` 节点实现的，
+而那正是官方 Standards 里"不得干扰其它节点"禁止的做法——现在换成我们自己的节点，官方节点完全不动。
+工作流里把「加载图像」换成它即可，路径不用改。
 （`conditioning` 进、`conditioning` 出，另接同一路 `clip`），它会在条件已经算完之后把文本编码器
 从显存里放掉。条件是现成的，所以画面不受影响；释放的是你指定的那个编码器（以及本包自己缓存的 PE 编码器），
 **不会碰扩散模型、VAE 或其它任何已载入的模型**。实测一次释放 7.6GB → 14.6GB 可用显存。
@@ -320,6 +325,14 @@ There is also a **list-aware text encoder**, **Text Encode Qwen Image 2.1 (List)
 it dies with `'list' object has no attribute 'startswith'`. This one takes a list in and returns lists
 of `positive` / `negative` / `latent`, so a `Prompt Count` above 1 reaches the sampler one prompt at a
 time. Reference images are resized and VAE-encoded once and shared by every prompt.
+
+There is also a small general-purpose node, **Release Text Encoder (VRAM)**. Wire it between the text
+
+And **Load Image (recursive)**: the same as the stock Load Image, except the dropdown covers every
+subfolder of `input/` (pasted files land in `input/pasted/`). That convenience used to come from
+rewriting the core LoadImage node, which is exactly the cross-node interference the registry's
+standards forbid -- it is this pack's own node now, and the core node is left untouched. Swap the
+image node in your workflow for it; the file paths stay the same.
 
 There is also a small general-purpose node, **Release Text Encoder (VRAM)**. Wire it between the text
 encode and the sampler (`conditioning` in, `conditioning` out, plus the same `clip`), and it drops the

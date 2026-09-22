@@ -962,6 +962,72 @@ def _quality_errors(text, duration, sections=SECTION_NAMES):
     return errors
 
 
+def _input_image_files():
+    """Every image file under the input directory, subfolders included.
+
+    The stock Load Image node lists the top level only, so images pasted into
+    something like input/pasted/ never show up in its dropdown. Doing that by
+    rewriting the stock node's INPUT_TYPES from here is the kind of
+    cross-node interference the registry's standards forbid, so this pack offers
+    the same convenience as its own node instead.
+    """
+    root = folder_paths.get_input_directory()
+    files = []
+    for current, _, names in os.walk(root):
+        for name in names:
+            full = os.path.join(current, name)
+            if os.path.isfile(full):
+                files.append(os.path.relpath(full, root).replace(os.sep, "/"))
+    return sorted(folder_paths.filter_files_content_types(files, ["image"]))
+
+
+class PromptEnhancerLoadImage:
+    """Load Image, with a dropdown that also covers input subfolders.
+
+    Reading is delegated to the stock node's own loader, so EXIF rotation, alpha
+    handling, animated formats and the upload button all behave exactly as they
+    do in Load Image.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "image": (
+                    _input_image_files(),
+                    {
+                        "image_upload": True,
+                        "tooltip": "input 目录下的图片（含子目录，例如 pasted/ 里的粘贴图）。",
+                    },
+                )
+            }
+        }
+
+    RETURN_TYPES = ("IMAGE", "MASK")
+    FUNCTION = "load"
+    CATEGORY = "Prompt Enhancer"
+    DESCRIPTION = "Load an image from the input directory, including its subfolders."
+
+    def load(self, image):
+        import nodes as comfy_nodes
+
+        return comfy_nodes.LoadImage().load_image(image)
+
+    @classmethod
+    def IS_CHANGED(cls, image):
+        path = folder_paths.get_annotated_filepath(image)
+        digest = hashlib.sha256()
+        with open(path, "rb") as handle:
+            digest.update(handle.read())
+        return digest.digest().hex()
+
+    @classmethod
+    def VALIDATE_INPUTS(cls, image):
+        if not folder_paths.exists_annotated_filepath(image):
+            return f"Invalid image file: {image}"
+        return True
+
+
 class H3SaveImage:
     """Save images as PNG/JPG/WEBP, with optional workflow sidecar JSON."""
 
@@ -1567,10 +1633,12 @@ NODE_CLASS_MAPPINGS = {
     "H3Prompt": Qwen36MultiImageH3ChinesePrompt,
     "H3SaveImage": H3SaveImage,
     "H3ImagePromptGenerator": H3ImagePromptGenerator,
+    "PromptEnhancerLoadImage": PromptEnhancerLoadImage,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "H3Prompt": "H3 Prompt",
     "H3SaveImage": "H3 Save Image",
     "H3ImagePromptGenerator": "Image Prompt Generator",
+    "PromptEnhancerLoadImage": "Load Image (recursive)",
 }
