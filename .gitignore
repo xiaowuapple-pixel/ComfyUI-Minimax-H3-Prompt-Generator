@@ -3,3 +3,5 @@ __pycache__/
 .pytest_cache/
 
 official_skills/
+# comfy node publish writes this build artifact next to the source
+node.zip
