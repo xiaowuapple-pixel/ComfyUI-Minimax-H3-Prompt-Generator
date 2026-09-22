@@ -114,7 +114,7 @@ GPU 卸载层数默认为 `-1`，表示全部放入显存；显存不足时可�
 
 - 两个任务各有独立权重和独立系统提示词，节点已原样内置在 `pe_prompts/`，不会与权重脱节
 - 输出四路：`Positive Prompt`、`WH Ratio`、`Ratio Follow`、`Parse OK`
-- 另外输出 `Width` / `Height` 两个整数：t2i 按模型选的画幅 + `Target Megapixels` 换算，edit 直接沿用参考图尺寸
+- 另外输出 `Width` / `Height` 两个整数：都是「画幅 × `Target Megapixels`」——t2i 的画幅由模型选，edit 沿用参考图的画幅，像素量始终按你设的算
 - `t2i` 只接受文字；`edit` 最多 10 张参考图（模型上限），按顺序用 `<image1>`… 引用，顺序不能乱
 - 图片端口是动态的：默认只显示 `Image 1`，连上以后才长出 `Image 2`，依次类推，最多 10 个
 - 思考默认开启，长度由加载节点上的 `Plan Tokens` 控制（默认 800，`-1` 为不限）；思考内容始终不会写进提示词
@@ -309,7 +309,7 @@ Qwen3.5-VL 9B) and turns a short request into the long prompt 2.1 expects.
 
 - Each task has its own checkpoint and its own system prompt; both prompts ship verbatim in `pe_prompts/`
 - Six outputs: `Positive Prompt`, `WH Ratio`, `Ratio Follow`, `Parse OK`, `Width`, `Height`
-- `Width` / `Height` are pixels: t2i scales the model's ratio to `Target Megapixels`, edit reuses the source image's size
+- `Width` / `Height` are pixels: ratio x `Target Megapixels` in both tasks -- the model picks the ratio for t2i, edit follows the reference image's ratio, and the pixel count is always the one you set
 - `t2i` takes text only; `edit` takes up to 10 reference images (the model's limit), referenced as `<image1>`... in connection order
 - Image sockets are dynamic: only `Image 1` shows at first, and connecting it reveals `Image 2`, up to ten
 - Thinking is on by default and its length is capped by the loader's `Plan Tokens` (800 by default, -1 for no cap);

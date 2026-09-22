@@ -692,8 +692,11 @@ def _resolve_canvas(parsed, images, megapixels, multiple=16, forced_pair=None):
     """Pixel size for the render, so WH Ratio is usable without hand-copying.
 
     t2i: the model picked the ratio, the megapixel budget is yours.
-    edit: `ratio_follow` names the source image whose framing the output keeps,
-    so the answer is that image's own size -- rescaling it would defeat the point.
+    edit: `ratio_follow` names the source image whose *framing* the output keeps.
+    That is its aspect ratio, not its pixel count: taking the source's exact size
+    ignored Target Megapixels completely, so an Auto run came out whatever the
+    reference happened to be (measured: 1024x1536 for a 2.3 MP setting) while
+    forcing a ratio came out right.
     """
     if forced_pair:
         return _canvas_from_pair(forced_pair, megapixels, multiple)
@@ -703,7 +706,9 @@ def _resolve_canvas(parsed, images, megapixels, multiple=16, forced_pair=None):
         if follow:
             index = _image_index(follow)
             if 0 <= index < len(images):
-                return _canvas_from_image(images[index], multiple)
+                source = images[index]
+                source_pair = (int(source.shape[-2]), int(source.shape[-3]))
+                return _canvas_from_pair(source_pair, megapixels, multiple)
         if pair:
             return _canvas_from_pair(pair, megapixels, multiple)
     return _canvas_from_pair(pair or (1, 1), megapixels, multiple)
@@ -1375,7 +1380,8 @@ class QwenImage21PromptEnhancer:
                         "min": 0.1,
                         "max": 16.0,
                         "step": 0.1,
-                        "tooltip": "Width/Height 按这个像素总量算（edit 沿用参考图尺寸）。",
+                        "tooltip": "Width/Height 按这个像素总量算。"
+                                   "t2i 用模型选的画幅；edit 用参考图的画幅、像素量还是按这里算。",
                     },
                 ),
                 "Aspect Ratio": (
