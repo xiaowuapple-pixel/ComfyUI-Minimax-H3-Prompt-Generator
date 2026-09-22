@@ -44,6 +44,10 @@ GGUF 走 llama.cpp，实测比 int8 safetensors 快约 5 倍，16GB 显存建议
 | 范例 | 内容 | 除本包外还需要 |
 | --- | --- | --- |
 | `Qwen-Image-2.1-TI2I.json` | Qwen Image 2.1 文生图 / 改图：PE 加载 + 提示词增强 + 多张参考图 | ComfyUI_LayerStyle、rgthree-comfy、ComfyUI-Crystools、ComfyUI-Easy-Use、KayTool |
+
+这些范例同时会出现在 ComfyUI 的 **`工作流 → 浏览模板`** 里（官方规定：custom node 目录下的
+`example_workflows/` 会被模板浏览器读取，同名 `.jpg` 作为缩略图）。所以装完本包不用去 GitHub 找，
+直接在模板浏览器里就能打开。
 | `MiniMax-H3-multi-reference.json` | H3 多参考视频：音频精修、冻结缓存、RTX 超分 | ComfyUI-H3-Multishot、ComfyUI-H3-AudioRefine、comfyui-minimax-h3-audio-T8、ComfyUI-KJNodes、ComfyUI-VideoHelperSuite、ComfyUI-DLSS5-Enhancer、Nvidia_RTX_Nodes_ComfyUI、ComfyUI-SolAttn_triton、ComfyUI-Easy-Use、KayTool |
 | `MiniMax-H3-two-pass-multi-reference.json` | H3 二采多参考：Turbo 采样 + 潜空间放大 | ComfyUI-H3-Multishot、ComfyUI-MiniMax-H3-Turbo、Comfyui_Minimax_h3_latent_Upscaler、ComfyUI-KJNodes、ComfyUI-VideoHelperSuite、ComfyUI-SolAttn_triton、rgthree-comfy、ComfyUI-Easy-Use、KayTool |
 
@@ -471,6 +475,10 @@ the third column lists what each one needs beyond this pack:
 | Example | What it does | Also needs |
 | --- | --- | --- |
 | `Qwen-Image-2.1-TI2I.json` | Qwen Image 2.1 text-to-image / edit: PE loader, prompt enhancer, several reference images | ComfyUI_LayerStyle, rgthree-comfy, ComfyUI-Crystools, ComfyUI-Easy-Use, KayTool |
+
+The same files show up in ComfyUI's **`Workflows -> Browse Templates`** browser: by ComfyUI's
+convention a `example_workflows/` folder inside a custom node is read by the template browser, and a
+`.jpg` with the same name becomes its thumbnail. Install the pack and the example is one click away.
 | `MiniMax-H3-multi-reference.json` | H3 multi-reference video: audio refine, frozen cache, RTX upscaling | ComfyUI-H3-Multishot, ComfyUI-H3-AudioRefine, comfyui-minimax-h3-audio-T8, ComfyUI-KJNodes, ComfyUI-VideoHelperSuite, ComfyUI-DLSS5-Enhancer, Nvidia_RTX_Nodes_ComfyUI, ComfyUI-SolAttn_triton, ComfyUI-Easy-Use, KayTool |
 | `MiniMax-H3-two-pass-multi-reference.json` | H3 two-pass multi-reference: turbo sampling plus latent upscaling | ComfyUI-H3-Multishot, ComfyUI-MiniMax-H3-Turbo, Comfyui_Minimax_h3_latent_Upscaler, ComfyUI-KJNodes, ComfyUI-VideoHelperSuite, ComfyUI-SolAttn_triton, rgthree-comfy, ComfyUI-Easy-Use, KayTool |
 
