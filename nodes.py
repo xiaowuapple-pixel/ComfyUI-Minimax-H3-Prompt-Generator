@@ -962,6 +962,138 @@ def _quality_errors(text, duration, sections=SECTION_NAMES):
     return errors
 
 
+SCALE_BY_MULTIPLIER = "scale by multiplier"
+TARGET_DIMENSIONS = "target dimensions"
+
+# nvvfx ships more levels than the NVIDIA node exposes; DENOISE_* and DEBLUR_*
+# are for footage, the plain ones are the ones that suit a still.
+RTX_QUALITY_LEVELS = (
+    "BICUBIC",
+    "LOW",
+    "MEDIUM",
+    "HIGH",
+    "ULTRA",
+    "DENOISE_LOW",
+    "DENOISE_MEDIUM",
+    "DENOISE_HIGH",
+    "DENOISE_ULTRA",
+    "DEBLUR_LOW",
+    "DEBLUR_MEDIUM",
+    "DEBLUR_HIGH",
+    "DEBLUR_ULTRA",
+)
+
+
+def _import_nvvfx():
+    """NVIDIA's VFX runtime, which is what actually does the upscaling."""
+    try:
+        import nvvfx
+    except ImportError as exc:
+        raise RuntimeError(
+            "RTX 超分需要 NVIDIA 的 VFX 运行时：pip install nvidia-vfx"
+            "（装完重启 ComfyUI）。"
+        ) from exc
+    return nvvfx
+
+
+class RTXImageSuperResolution:
+    """RTX super resolution for stills, with or without an alpha channel.
+
+    The NVIDIA node feeds three-channel frames to the engine, so a Qwen-Image
+    result (RGBA) cannot go through it -- the alpha has nowhere to live. This one
+    splits the alpha off, upscales the visible three channels with the same nvvfx
+    engine, enlarges the alpha to match and puts the four channels back together,
+    so a cut-out poster keeps its transparency.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "images": ("IMAGE", {"tooltip": "要放大的图像，RGB 或 RGBA 都行。"}),
+                "resize_type": (
+                    [SCALE_BY_MULTIPLIER, TARGET_DIMENSIONS],
+                    {
+                        "default": SCALE_BY_MULTIPLIER,
+                        "tooltip": "按倍数放大，或者指定目标宽高。",
+                    },
+                ),
+                "scale": (
+                    "FLOAT",
+                    {"default": 2.0, "min": 1.0, "max": 4.0, "step": 0.01},
+                ),
+                "width": ("INT", {"default": 1920, "min": 64, "max": 8192, "step": 8}),
+                "height": ("INT", {"default": 1080, "min": 64, "max": 8192, "step": 8}),
+                "quality": (
+                    list(RTX_QUALITY_LEVELS),
+                    {
+                        "default": "ULTRA",
+                        "tooltip": "ULTRA 最清晰也最慢；DENOISE_*/DEBLUR_* 是给视频帧用的档位。",
+                    },
+                ),
+            }
+        }
+
+    RETURN_TYPES = ("IMAGE",)
+    RETURN_NAMES = ("upscaled_images",)
+    FUNCTION = "upscale"
+    CATEGORY = "Prompt Enhancer"
+    DESCRIPTION = "RTX super resolution that keeps an alpha channel when the input has one."
+
+    def upscale(self, images, resize_type, scale, width, height, quality):
+        import comfy.utils
+        import torch
+
+        nvvfx = _import_nvvfx()
+
+        batch, in_h, in_w, channels = images.shape
+        if resize_type == TARGET_DIMENSIONS:
+            out_w, out_h = int(width), int(height)
+        else:
+            out_w, out_h = int(in_w * float(scale)), int(in_h * float(scale))
+        out_w = max(8, round(out_w / 8) * 8)
+        out_h = max(8, round(out_h / 8) * 8)
+
+        has_alpha = channels > 3
+        rgb = images[..., :3]
+        alpha = images[..., 3:4] if has_alpha else None
+
+        level = getattr(nvvfx.effects.QualityLevel, quality, None)
+        if level is None:
+            level = nvvfx.effects.QualityLevel.ULTRA
+
+        result = torch.empty((batch, out_h, out_w, 3), dtype=torch.float32)
+        with nvvfx.VideoSuperRes(level) as engine:
+            engine.output_width = out_w
+            engine.output_height = out_h
+            engine.load()
+            for index in range(batch):
+                frame = rgb[index].permute(2, 0, 1).float().cuda().contiguous()
+                dlpack_image = engine.run(frame).image
+                frame_out = torch.from_dlpack(dlpack_image)
+                # The engine hands back CHW; keep the visible three channels in
+                # case a future build appends something of its own.
+                result[index] = frame_out.movedim(0, -1)[:, :, :3].to(result.device)
+
+        if alpha is not None:
+            # The engine has no alpha input, so the channel is enlarged with a
+            # plain resample and reattached. Not comfy.utils.common_upscale: its
+            # lanczos path assumes three channels and collapses a single one.
+            enlarged = torch.nn.functional.interpolate(
+                alpha.movedim(-1, 1).float(),
+                size=(out_h, out_w),
+                mode="bilinear",
+                align_corners=False,
+            ).movedim(1, -1)
+            result = torch.cat([result, enlarged.to(result.device)], dim=-1)
+
+        print(
+            f"[Prompt Enhancer] RTX 超分：{in_w}x{in_h} → {out_w}x{out_h}"
+            f"（{quality}，{'RGBA' if has_alpha else 'RGB'}）"
+        )
+        return (result.to(images.dtype),)
+
+
 def _input_image_files():
     """Every image file under the input directory, subfolders included.
 
@@ -1634,6 +1766,7 @@ NODE_CLASS_MAPPINGS = {
     "H3SaveImage": H3SaveImage,
     "H3ImagePromptGenerator": H3ImagePromptGenerator,
     "PromptEnhancerLoadImage": PromptEnhancerLoadImage,
+    "RTXImageSuperResolution": RTXImageSuperResolution,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -1641,4 +1774,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "H3SaveImage": "H3 Save Image",
     "H3ImagePromptGenerator": "Image Prompt Generator",
     "PromptEnhancerLoadImage": "Load Image (recursive)",
+    "RTXImageSuperResolution": "RTX Image Super Resolution (RGBA)",
 }

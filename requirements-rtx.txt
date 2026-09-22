@@ -1,0 +1,3 @@
+# RTX Image Super Resolution (RGBA) 需要 NVIDIA 的 VFX 运行时。
+# 只有用这个节点才要装；其余节点不依赖它。
+nvidia-vfx

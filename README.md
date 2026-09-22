@@ -143,6 +143,13 @@ Qwen Image 2.1` 只吃单个字符串，把增强节点的 `Positive Prompt`（�
 （比如粘贴进来的 `pasted/image (64).png`）。以前这个便利是靠改写核心 `LoadImage` 节点实现的，
 而那正是官方 Standards 里"不得干扰其它节点"禁止的做法——现在换成我们自己的节点，官方节点完全不动。
 工作流里把「加载图像」换成它即可，路径不用改。
+
+还有 **RTX Image Super Resolution (RGBA)**：给静止图像做 RTX 超分，**RGB 和 RGBA 都吃**。
+官方的 `RTX Video Super Resolution` 只往引擎里送三通道，所以 Qwen Image 2.1 那种带 alpha 的成图
+过不去（透明通道没地方放）。这个节点把 alpha 拆出来单独放大、再合并回去，抠好的海报放大后
+**透明度原样保留**。档位除了 LOW/MEDIUM/HIGH/ULTRA，还开放了 nvvfx 的 DENOISE_* 与 DEBLUR_*
+（那是给视频帧用的）。需要 NVIDIA 的 VFX 运行时：`pip install -r requirements-rtx.txt`
+（或 `pip install -e .[rtx]`），装完重启 ComfyUI；其余节点不依赖它。
 （`conditioning` 进、`conditioning` 出，另接同一路 `clip`），它会在条件已经算完之后把文本编码器
 从显存里放掉。条件是现成的，所以画面不受影响；释放的是你指定的那个编码器（以及本包自己缓存的 PE 编码器），
 **不会碰扩散模型、VAE 或其它任何已载入的模型**。实测一次释放 7.6GB → 14.6GB 可用显存。
@@ -333,6 +340,14 @@ subfolder of `input/` (pasted files land in `input/pasted/`). That convenience u
 rewriting the core LoadImage node, which is exactly the cross-node interference the registry's
 standards forbid -- it is this pack's own node now, and the core node is left untouched. Swap the
 image node in your workflow for it; the file paths stay the same.
+
+And **RTX Image Super Resolution (RGBA)**: RTX upscaling for stills that takes **RGB and RGBA**. The
+stock `RTX Video Super Resolution` hands the engine three-channel frames only, so a Qwen Image 2.1
+result with an alpha channel cannot go through it. This node lifts the alpha out, upscales the visible
+three channels with the same nvvfx engine, enlarges the alpha to match and reattaches it, so a cut-out
+poster stays cut out. It also exposes nvvfx's DENOISE_* and DEBLUR_* levels (meant for footage) on top
+of LOW/MEDIUM/HIGH/ULTRA. Needs NVIDIA's VFX runtime: `pip install -r requirements-rtx.txt` (or
+`pip install -e .[rtx]`), then restart ComfyUI. Nothing else in the pack depends on it.
 
 There is also a small general-purpose node, **Release Text Encoder (VRAM)**. Wire it between the text
 encode and the sampler (`conditioning` in, `conditioning` out, plus the same `clip`), and it drops the
