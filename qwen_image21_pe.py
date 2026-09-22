@@ -1190,6 +1190,12 @@ class QwenImage21TextEncodeList:
 
     RETURN_TYPES = ("CONDITIONING", "CONDITIONING", "LATENT")
     RETURN_NAMES = ("positive", "negative", "latent")
+    OUTPUT_TOOLTIPS = (
+        "正面条件。",
+        "负面条件。",
+        "空 latent（16 通道 × 4 层，带 alpha 层）。要透明背景必须用这一路："
+        "普通「空Latent」只有 4 通道、没有 alpha 层，提示词写得再对也只会得到纯白背景。",
+    )
     OUTPUT_IS_LIST = (True, True, True)
     FUNCTION = "encode"
     CATEGORY = "Prompt Enhancer"
