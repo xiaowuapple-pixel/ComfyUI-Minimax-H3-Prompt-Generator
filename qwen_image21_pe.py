@@ -685,8 +685,17 @@ _OPAQUE_BACKGROUNDS = (
 # The same thing said as a clause: "背景替换为纯白色，" / "background is pure
 # white." The white word has to end the clause, so "背景是白色蕾丝窗帘" (a white
 # lace curtain standing in the background) is left alone.
+# Any "白" that lands next to 背景/底 inside one clause describes the backdrop,
+# however it is dressed up: "干净纯白的背景" slipped past the phrase list above.
+# Only adjective words may sit next to it, so "身后的白色花朵背景" (a white
+# flower backdrop) keeps its noun instead of being eaten down to "透明背景".
+_WHITE_ADJECTIVE = r"(?:干净|洁净|纯净|纯|素|一片|整体|极简|淡|浅)"
+_WHITE_WORD = r"(?:纯白|洁白|雪白|素白|白色|白)"
+_WHITE_BACKDROP = re.compile(
+    rf"{_WHITE_ADJECTIVE}?{_WHITE_WORD}{_WHITE_ADJECTIVE}?的?(?:背景|底)"
+)
 _OPAQUE_BACKGROUND_CLAUSE = re.compile(
-    r"背景[^。；\n]{0,8}?(?:替换为|改为|换成|变成|为|是|用)\s*(?:纯白色|纯白|白色)(?=\s*(?:[，。；、]|$))",
+    r"背景[^。；\n]{0,8}?(?:替换为|改为|换成|变成|为|是|用)\s*(?:纯白色|纯白|白色)的?(?=\s*(?:[，。；、]|$))",
 )
 _OPAQUE_BACKGROUND_CLAUSE_EN = re.compile(
     r"background[^.;\n]{0,24}?(?:is|becomes|turned|replaced with|filled with)\s*"
@@ -720,6 +729,7 @@ def _restore_transparency(original, parsed):
     # rather than a verb followed by the wrong part of speech.
     fixed = _OPAQUE_BACKGROUND_CLAUSE.sub("背景为透明背景", fixed)
     fixed = _OPAQUE_BACKGROUND_CLAUSE_EN.sub("background is transparent", fixed)
+    fixed = _WHITE_BACKDROP.sub("透明背景", fixed)
     hint = _TRANSPARENCY_HINT["zh" if re.search(r"[\u4e00-\u9fff]", fixed) else "en"]
     if "alpha" not in fixed.lower():
         fixed = fixed.rstrip() + " " + hint
@@ -1561,6 +1571,18 @@ class QwenImage21PromptEnhancer:
             )
         else:
             model_prompt = prompt
+        if _TRANSPARENCY_REQUEST.search(prompt):
+            # Say it before generation as well as fixing it afterwards: the model
+            # reaches for "a clean white background" whenever a poster is asked
+            # for, and a note in the request is what stops that at the source.
+            model_prompt += (
+                "\n\n(背景要求：透明。只保留人物与文字，其余区域完全透明；"
+                "不要把背景描述成白色、纯色或任何实色。)"
+                if re.search(r"[\u4e00-\u9fff]", prompt)
+                else "\n\n(Background requirement: transparent. Keep only the subject and the text; "
+                "everything else is fully transparent. Do not describe the background as white, "
+                "solid or any colour.)"
+            )
         source = model.get("source", SOURCE_AUTO)
         if source == SOURCE_AUTO:
             # ComfyUI grows the KV cache with the request, so there is no fixed
