@@ -722,6 +722,11 @@ _TRANSPARENCY_HINT = {
     ),
 }
 
+# If the user's own words talk about white or about 留白, then white is their
+# intent rather than the model's slip, and the decision belongs to the model.
+# Rewriting it away would be overruling the brief.
+_WHITE_IN_REQUEST = re.compile(r"白|留白|空白|white", re.IGNORECASE)
+
 
 def _restore_transparency(original, parsed):
     """Put a transparency requirement back after the model rewrote it as white.
@@ -731,6 +736,12 @@ def _restore_transparency(original, parsed):
     the wording is restored here instead of being asked for again.
     """
     if not parsed.get("parse_ok") or not _TRANSPARENCY_REQUEST.search(original or ""):
+        return
+    if _WHITE_IN_REQUEST.search(original or ""):
+        print(
+            "[Qwen Image 2.1 PE] 你在请求里提到了白色/留白，这种情况不替你做决定，"
+            "保留模型自己写的排版描述。"
+        )
         return
     text = parsed["positive_prompt"]
     fixed = text
@@ -1589,11 +1600,11 @@ class QwenImage21PromptEnhancer:
             # for, and a note in the request is what stops that at the source.
             model_prompt += (
                 "\n\n(背景要求：透明。只保留人物与文字，其余区域完全透明；"
-                "不要把背景描述成白色、纯色或任何实色。)"
+                "不要把背景描述成纯色或任何实色。若用户自己要求了白色或留白，按用户的写。)"
                 if re.search(r"[\u4e00-\u9fff]", prompt)
                 else "\n\n(Background requirement: transparent. Keep only the subject and the text; "
-                "everything else is fully transparent. Do not describe the background as white, "
-                "solid or any colour.)"
+                "everything else is fully transparent. Do not describe the background as solid or "
+                "any colour. If the user asked for white or for white space, follow the user.)"
             )
         source = model.get("source", SOURCE_AUTO)
         if source == SOURCE_AUTO:
