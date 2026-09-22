@@ -138,6 +138,12 @@ Qwen Image 2.1` 只吃单个字符串，把增强节点的 `Positive Prompt`（�
 从显存里放掉。条件是现成的，所以画面不受影响；释放的是你指定的那个编码器（以及本包自己缓存的 PE 编码器），
 **不会碰扩散模型、VAE 或其它任何已载入的模型**。实测一次释放 7.6GB → 14.6GB 可用显存。
 
+> 关于透明背景：PE 模型没有 alpha 概念。实测请求里写"人物和文字之外的背景透明"，
+> 模型会改写成"背景替换为纯白色""人物边缘与纯白背景干净分离"——看着通顺，出来却是不透明白底。
+> 所以只要你的原始请求确实要求背景透明（`透明背景`/`去背`/`transparent background` 这类），
+> 节点会在模型回答之后把白底措辞改回透明并补一句 alpha 说明；没提透明背景的请求完全不动，
+> 像"透明薄纱长裙"这种说法不会被误伤。
+
 两个加载节点输出同一种 `PE Model`，**用哪个就接哪个**——这样每个模式只显示它需要的选择，
 不会出现"选了 A 还要面对 B 的空白控件"：
 
@@ -316,6 +322,13 @@ encode and the sampler (`conditioning` in, `conditioning` out, plus the same `cl
 text encoder once the conditioning exists. The conditioning is already computed, so the image is
 unaffected, and only the encoder you named (plus this pack's own cached PE encoder) is touched --
 never the diffusion model, the VAE or anything else loaded. Measured: 7.6 GB -> 14.6 GB free.
+
+> On transparent backgrounds: the PE models have no notion of alpha. Asked for a transparent background
+> they answer with "the background is replaced with pure white" and "the subject separates cleanly from
+> the pure white background" -- fluent, and an opaque white picture. So when the original request really
+> does ask for one (`透明背景`, `去背`, `transparent background`, ...), the node rewrites the white wording
+> back to transparent after the model answers and adds the alpha sentence. Requests that never mention a
+> transparent background are left alone, so "透明薄纱长裙" (sheer fabric) is not touched.
 
 Both loaders output the same `PE Model` type, so you wire whichever one matches your case -- and each shows
 only the pickers it needs:

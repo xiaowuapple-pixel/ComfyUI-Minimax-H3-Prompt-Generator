@@ -651,6 +651,86 @@ def _run_native_clip(clip, prompt, images, profile, system_prompt, sampling, thi
     return decoded if thinking else _restore_prefill(decoded)
 
 
+# A request that wants a see-through background. Scoped to "background" on
+# purpose: "透明薄纱" (sheer fabric) is a normal thing to ask for and must not
+# trigger this.
+_TRANSPARENCY_REQUEST = re.compile(
+    r"透明\s*背景|背景[^。；\n]{0,8}透明|透明[^。；\n]{0,6}背景|去背|抠图|"
+    r"不要背景|无背景|背景留空|"
+    r"transparent\s+background|background[^.;\n]{0,20}transparent|alpha\s+channel|"
+    r"remove\s+the\s+background|cut\s+out\s+the\s+background",
+    re.IGNORECASE,
+)
+
+# What the prompt enhancers write instead. They have no notion of alpha -- asked
+# for "人物和文字之外的背景透明" the PE-I2I checkpoint answered with
+# "背景替换为纯白色" and "人物边缘与纯白背景干净分离", which is precisely the
+# opaque white backdrop the request was trying to avoid.
+_OPAQUE_BACKGROUNDS = (
+    ("纯白色干净背景", "透明背景"),
+    ("纯白色背景", "透明背景"),
+    ("纯白背景", "透明背景"),
+    ("干净的白色背景", "透明背景"),
+    ("白色干净背景", "透明背景"),
+    ("白色背景", "透明背景"),
+    ("纯白底", "透明背景"),
+    ("白色底", "透明背景"),
+    ("白底", "透明背景"),
+    ("pure white background", "transparent background"),
+    ("clean white background", "transparent background"),
+    ("plain white background", "transparent background"),
+    ("white background", "transparent background"),
+)
+
+# The same thing said as a clause: "背景替换为纯白色，" / "background is pure
+# white." The white word has to end the clause, so "背景是白色蕾丝窗帘" (a white
+# lace curtain standing in the background) is left alone.
+_OPAQUE_BACKGROUND_CLAUSE = re.compile(
+    r"背景[^。；\n]{0,8}?(?:替换为|改为|换成|变成|为|是|用)\s*(?:纯白色|纯白|白色)(?=\s*(?:[，。；、]|$))",
+)
+_OPAQUE_BACKGROUND_CLAUSE_EN = re.compile(
+    r"background[^.;\n]{0,24}?(?:is|becomes|turned|replaced with|filled with)\s*"
+    r"(?:pure\s+|plain\s+|clean\s+)?white(?=\s*(?:[.,;]|$))",
+    re.IGNORECASE,
+)
+
+_TRANSPARENCY_HINT = {
+    "zh": "整体背景保持透明（alpha 通道），除人物与文字以外的区域全部透明，不要填充任何颜色。",
+    "en": (
+        "Keep the background fully transparent (alpha channel): everything outside "
+        "the subject and the text stays transparent, with no colour fill."
+    ),
+}
+
+
+def _restore_transparency(original, parsed):
+    """Put a transparency requirement back after the model rewrote it as white.
+
+    Rewriting "背景透明" into "纯白色背景" is a faithful looking answer that
+    produces the wrong picture, and the sampler cannot tell the difference, so
+    the wording is restored here instead of being asked for again.
+    """
+    if not parsed.get("parse_ok") or not _TRANSPARENCY_REQUEST.search(original or ""):
+        return
+    text = parsed["positive_prompt"]
+    fixed = text
+    for opaque, clear in _OPAQUE_BACKGROUNDS:
+        fixed = re.sub(re.escape(opaque), clear, fixed, flags=re.IGNORECASE)
+    # Each pattern rewrites the whole clause, so the result stays a sentence
+    # rather than a verb followed by the wrong part of speech.
+    fixed = _OPAQUE_BACKGROUND_CLAUSE.sub("背景为透明背景", fixed)
+    fixed = _OPAQUE_BACKGROUND_CLAUSE_EN.sub("background is transparent", fixed)
+    hint = _TRANSPARENCY_HINT["zh" if re.search(r"[\u4e00-\u9fff]", fixed) else "en"]
+    if "alpha" not in fixed.lower():
+        fixed = fixed.rstrip() + " " + hint
+    if fixed != text:
+        parsed["positive_prompt"] = fixed
+        print(
+            "[Qwen Image 2.1 PE] 你的请求要求背景透明，模型把它写成了白底；"
+            "已把背景改回透明并补上 alpha 说明。"
+        )
+
+
 def _ratio_to_pair(text):
     """Parse the model's own ratio format ("16:9") into (width, height)."""
     match = re.match(r"\s*(\d+)\s*[:：xX×]\s*(\d+)\s*$", text or "")
@@ -1626,6 +1706,7 @@ class QwenImage21PromptEnhancer:
 
     @staticmethod
     def _store(parsed, cache_key, task, prompt, images, megapixels, forced_ratio, forced_pair):
+        _restore_transparency(prompt, parsed)
         width, height = _resolve_canvas(parsed, images, megapixels, forced_pair=forced_pair)
         if forced_pair and parsed.get("wh_ratio") and forced_ratio != parsed["wh_ratio"]:
             print(
