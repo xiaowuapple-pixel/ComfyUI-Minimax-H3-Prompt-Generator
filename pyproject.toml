@@ -17,7 +17,7 @@ Repository = "https://github.com/xiaowuapple-pixel/ComfyUI-Prompt-Enhancer"
 local-gguf = ["llama-cpp-python>=0.3.46"]
 
 [tool.comfy]
-PublisherId = "xiaowuapple-pixel"
+PublisherId = "xiaowu"
 DisplayName = "Prompt Enhancer"
 Icon = ""
 includes = []
