@@ -138,19 +138,11 @@ Qwen Image 2.1` 只吃单个字符串，把增强节点的 `Positive Prompt`（�
 从显存里放掉。条件是现成的，所以画面不受影响；释放的是你指定的那个编码器（以及本包自己缓存的 PE 编码器），
 **不会碰扩散模型、VAE 或其它任何已载入的模型**。实测一次释放 7.6GB → 14.6GB 可用显存。
 
-> 关于透明背景：PE 模型没有 alpha 概念。实测请求里写"人物和文字之外的背景透明"，
-> 模型会改写成"背景替换为纯白色""人物边缘与纯白背景干净分离"——看着通顺，出来却是不透明白底。
-> 所以只要你的原始请求确实要求背景透明（`透明背景`/`去背`/`transparent background` 这类），
-> 节点会在模型回答之后把白底措辞改回透明并补一句 alpha 说明；没提透明背景的请求完全不动，
-> 像"透明薄纱长裙"这种说法不会被误伤。
->
-> 同一个问题还有第二种写法：海报类请求常出现"四周留出大片**白色空白**用于排版文字"，
-> 那个颜色词描述的是画布本身，模型会真的去涂一块白板。这类只删掉颜色词（保留"留白/空白"
-> 这些排版术语），构图信息一点不丢；描述主体的白（白色薄纱大袖衫、白色小花发饰）原样不动。
->
-> 但**只要你的请求自己提到了白色/留白**（例如"要白色底""四周留白"），
-> 节点就整套都不介入、原样保留模型写的排版描述——那属于你的意图，不该由节点替你决定。
-> 控制台会明确打印这一次到底改没改。
+> 关于透明背景：模型对 alpha 的判断很不稳定——同一句提示词、换一张参考图就可能在"透明"和"白底"
+> 之间翻转，而且**不由提示词决定**（实测：只改提示词没有变化，只改参考图就翻转）。
+> 所以节点**不做任何透明相关的改写**：模型写成什么就是什么。
+> 需要稳定透明，走二次编辑——先出图，再用同一个模型跑一次"去掉白底"的编辑（这条路对很细的文字边缘
+> 也很有效）；或者后期用抠图模型处理。
 
 两个加载节点输出同一种 `PE Model`，**用哪个就接哪个**——这样每个模式只显示它需要的选择，
 不会出现"选了 A 还要面对 B 的空白控件"：
@@ -331,12 +323,12 @@ text encoder once the conditioning exists. The conditioning is already computed,
 unaffected, and only the encoder you named (plus this pack's own cached PE encoder) is touched --
 never the diffusion model, the VAE or anything else loaded. Measured: 7.6 GB -> 14.6 GB free.
 
-> On transparent backgrounds: the PE models have no notion of alpha. Asked for a transparent background
-> they answer with "the background is replaced with pure white" and "the subject separates cleanly from
-> the pure white background" -- fluent, and an opaque white picture. So when the original request really
-> does ask for one (`透明背景`, `去背`, `transparent background`, ...), the node rewrites the white wording
-> back to transparent after the model answers and adds the alpha sentence. Requests that never mention a
-> transparent background are left alone, so "透明薄纱长裙" (sheer fabric) is not touched.
+> On transparent backgrounds: the model's alpha decision is unstable -- the same prompt flips between
+> transparent and white when the reference image changes, and it is **not controlled by the prompt**
+> (measured: changing only the prompt changed nothing, changing only the reference flipped it).
+> The node therefore does **no transparency rewriting**: whatever the model writes is what you get.
+> For dependable alpha, generate first and run a second edit pass with the same model to drop the white
+> background -- that works well even for very fine text edges -- or cut the subject out with a matte model.
 
 Both loaders output the same `PE Model` type, so you wire whichever one matches your case -- and each shows
 only the pickers it needs:

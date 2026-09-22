@@ -651,119 +651,6 @@ def _run_native_clip(clip, prompt, images, profile, system_prompt, sampling, thi
     return decoded if thinking else _restore_prefill(decoded)
 
 
-# A request that wants a see-through background. Scoped to "background" on
-# purpose: "透明薄纱" (sheer fabric) is a normal thing to ask for and must not
-# trigger this.
-_TRANSPARENCY_REQUEST = re.compile(
-    r"透明\s*背景|背景[^。；\n]{0,8}透明|透明[^。；\n]{0,6}背景|去背|抠图|"
-    r"不要背景|无背景|背景留空|"
-    r"transparent\s+background|background[^.;\n]{0,20}transparent|alpha\s+channel|"
-    r"remove\s+the\s+background|cut\s+out\s+the\s+background",
-    re.IGNORECASE,
-)
-
-# What the prompt enhancers write instead. They have no notion of alpha -- asked
-# for "人物和文字之外的背景透明" the PE-I2I checkpoint answered with
-# "背景替换为纯白色" and "人物边缘与纯白背景干净分离", which is precisely the
-# opaque white backdrop the request was trying to avoid.
-_OPAQUE_BACKGROUNDS = (
-    ("纯白色干净背景", "透明背景"),
-    ("纯白色背景", "透明背景"),
-    ("纯白背景", "透明背景"),
-    ("干净的白色背景", "透明背景"),
-    ("白色干净背景", "透明背景"),
-    ("白色背景", "透明背景"),
-    ("纯白底", "透明背景"),
-    ("白色底", "透明背景"),
-    ("白底", "透明背景"),
-    ("pure white background", "transparent background"),
-    ("clean white background", "transparent background"),
-    ("plain white background", "transparent background"),
-    ("white background", "transparent background"),
-)
-
-# The same thing said as a clause: "背景替换为纯白色，" / "background is pure
-# white." The white word has to end the clause, so "背景是白色蕾丝窗帘" (a white
-# lace curtain standing in the background) is left alone.
-# Any "白" that lands next to 背景/底 inside one clause describes the backdrop,
-# however it is dressed up: "干净纯白的背景" slipped past the phrase list above.
-# Only adjective words may sit next to it, so "身后的白色花朵背景" (a white
-# flower backdrop) keeps its noun instead of being eaten down to "透明背景".
-_WHITE_ADJECTIVE = r"(?:干净|洁净|纯净|纯|素|一片|整体|极简|淡|浅)"
-_WHITE_WORD = r"(?:纯白|洁白|雪白|素白|白色|白)"
-_WHITE_BACKDROP = re.compile(
-    rf"{_WHITE_ADJECTIVE}?{_WHITE_WORD}{_WHITE_ADJECTIVE}?的?(?:背景|底)"
-)
-
-# The other half of the problem, found by the field: a poster brief says "四周留
-# 出大片白色空白用于排版文字", and that colour word describes the canvas itself,
-# so the model paints an opaque plate instead of leaving alpha. 留白/空白 is the
-# layout term for the same area, so dropping just the colour keeps the brief
-# intact -- and the alpha comes back. Measured: with the white words left in the
-# channel was usually missing, with them removed it was usually there.
-# Only these nouns are touched, so white clothing and white flowers are safe.
-_WHITE_EMPTY_AREA = re.compile(
-    rf"(?:{_WHITE_ADJECTIVE}?{_WHITE_WORD}的?)(?=(?:空白|留白|空处|空白处|空白区|空区域|背景留白))"
-)
-_OPAQUE_BACKGROUND_CLAUSE = re.compile(
-    r"背景[^。；\n]{0,8}?(?:替换为|改为|换成|变成|为|是|用)\s*(?:纯白色|纯白|白色)的?(?=\s*(?:[，。；、]|$))",
-)
-_OPAQUE_BACKGROUND_CLAUSE_EN = re.compile(
-    r"background[^.;\n]{0,24}?(?:is|becomes|turned|replaced with|filled with)\s*"
-    r"(?:pure\s+|plain\s+|clean\s+)?white(?=\s*(?:[.,;]|$))",
-    re.IGNORECASE,
-)
-
-_TRANSPARENCY_HINT = {
-    "zh": "整体背景保持透明（alpha 通道），除人物与文字以外的区域全部透明，不要填充任何颜色。",
-    "en": (
-        "Keep the background fully transparent (alpha channel): everything outside "
-        "the subject and the text stays transparent, with no colour fill."
-    ),
-}
-
-# If the user's own words talk about white or about 留白, then white is their
-# intent rather than the model's slip, and the decision belongs to the model.
-# Rewriting it away would be overruling the brief.
-_WHITE_IN_REQUEST = re.compile(r"白|留白|空白|white", re.IGNORECASE)
-
-
-def _restore_transparency(original, parsed):
-    """Put a transparency requirement back after the model rewrote it as white.
-
-    Rewriting "背景透明" into "纯白色背景" is a faithful looking answer that
-    produces the wrong picture, and the sampler cannot tell the difference, so
-    the wording is restored here instead of being asked for again.
-    """
-    if not parsed.get("parse_ok") or not _TRANSPARENCY_REQUEST.search(original or ""):
-        return
-    if _WHITE_IN_REQUEST.search(original or ""):
-        print(
-            "[Qwen Image 2.1 PE] 你在请求里提到了白色/留白，这种情况不替你做决定，"
-            "保留模型自己写的排版描述。"
-        )
-        return
-    text = parsed["positive_prompt"]
-    fixed = text
-    for opaque, clear in _OPAQUE_BACKGROUNDS:
-        fixed = re.sub(re.escape(opaque), clear, fixed, flags=re.IGNORECASE)
-    # Each pattern rewrites the whole clause, so the result stays a sentence
-    # rather than a verb followed by the wrong part of speech.
-    fixed = _OPAQUE_BACKGROUND_CLAUSE.sub("背景为透明背景", fixed)
-    fixed = _OPAQUE_BACKGROUND_CLAUSE_EN.sub("background is transparent", fixed)
-    fixed = _WHITE_BACKDROP.sub("透明背景", fixed)
-    fixed = _WHITE_EMPTY_AREA.sub("", fixed)
-    hint = _TRANSPARENCY_HINT["zh" if re.search(r"[\u4e00-\u9fff]", fixed) else "en"]
-    if "alpha" not in fixed.lower():
-        fixed = fixed.rstrip() + " " + hint
-    if fixed != text:
-        parsed["positive_prompt"] = fixed
-        print(
-            "[Qwen Image 2.1 PE] 你的请求要求背景透明，模型把它写成了白底；"
-            "已把背景改回透明并补上 alpha 说明。"
-        )
-
-
 def _ratio_to_pair(text):
     """Parse the model's own ratio format ("16:9") into (width, height)."""
     match = re.match(r"\s*(\d+)\s*[:：xX×]\s*(\d+)\s*$", text or "")
@@ -1594,18 +1481,6 @@ class QwenImage21PromptEnhancer:
             )
         else:
             model_prompt = prompt
-        if _TRANSPARENCY_REQUEST.search(prompt):
-            # Say it before generation as well as fixing it afterwards: the model
-            # reaches for "a clean white background" whenever a poster is asked
-            # for, and a note in the request is what stops that at the source.
-            model_prompt += (
-                "\n\n(背景要求：透明。只保留人物与文字，其余区域完全透明；"
-                "不要把背景描述成纯色或任何实色。若用户自己要求了白色或留白，按用户的写。)"
-                if re.search(r"[\u4e00-\u9fff]", prompt)
-                else "\n\n(Background requirement: transparent. Keep only the subject and the text; "
-                "everything else is fully transparent. Do not describe the background as solid or "
-                "any colour. If the user asked for white or for white space, follow the user.)"
-            )
         source = model.get("source", SOURCE_AUTO)
         if source == SOURCE_AUTO:
             # ComfyUI grows the KV cache with the request, so there is no fixed
@@ -1793,7 +1668,6 @@ class QwenImage21PromptEnhancer:
 
     @staticmethod
     def _store(parsed, cache_key, task, prompt, images, megapixels, forced_ratio, forced_pair):
-        _restore_transparency(prompt, parsed)
         width, height = _resolve_canvas(parsed, images, megapixels, forced_pair=forced_pair)
         if forced_pair and parsed.get("wh_ratio") and forced_ratio != parsed["wh_ratio"]:
             print(
