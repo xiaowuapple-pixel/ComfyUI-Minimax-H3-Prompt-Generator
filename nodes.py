@@ -751,6 +751,28 @@ def _tensor_to_data_url(tensor, max_size=512):
     return f"data:image/jpeg;base64,{payload}"
 
 
+def _frame_to_pil(frame):
+    """Turn one IMAGE frame (H, W, C) into a PIL image.
+
+    ComfyUI images are usually RGB, but RGBA VAEs (Qwen Image 2.1 decodes to
+    four channels) hand over an alpha channel too. ``Image.fromarray(array,
+    mode)`` does not verify that the array matches the requested mode: it feeds
+    the whole byte stream to ``frombuffer``, so forcing "RGB" onto a
+    four-channel frame shreds the picture into a striped, repeated mess. Pick
+    the mode from the real channel count instead.
+    """
+    array = np.clip(frame.detach().cpu().numpy() * 255.0, 0, 255).astype(np.uint8)
+    if array.ndim == 2:
+        array = array[:, :, None]
+    channels = array.shape[-1]
+    if channels >= 4:
+        return Image.fromarray(array[:, :, :4], "RGBA")
+    if channels == 3:
+        return Image.fromarray(array, "RGB")
+    # One channel (or anything unexpected) goes out as grayscale.
+    return Image.fromarray(array[:, :, 0], "L")
+
+
 def _collect_images(inputs, allow_empty=False):
     images = []
     for index in range(1, 10):
@@ -1222,8 +1244,10 @@ class H3SaveImage:
             if match:
                 next_number = max(next_number, int(match.group(1)) + 1)
         for index, tensor in enumerate(images, start=1):
-            array = np.clip(tensor.detach().cpu().numpy() * 255.0, 0, 255).astype(np.uint8)
-            image = Image.fromarray(array, "RGB")
+            image = _frame_to_pil(tensor)
+            if fmt == "JPG" and image.mode != "RGB":
+                # JPEG has no alpha, so keep the colour channels and drop it.
+                image = image.convert("RGB")
             stem = f"{prefix}_{next_number:05d}"
             path = os.path.join(output_dir, stem + extension)
             # A concurrent writer may claim the number between the directory
